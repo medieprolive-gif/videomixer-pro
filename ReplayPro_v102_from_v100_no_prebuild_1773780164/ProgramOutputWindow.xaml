@@ -1,0 +1,17 @@
+<Window x:Class="ReplayPro.ProgramOutputWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PGM Output v34"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        Topmost="True"
+        Background="Black"
+        ShowInTaskbar="False">
+    <Grid Background="Black" UseLayoutRounding="True" SnapsToDevicePixels="True">
+        <Image Name="ProgramOutputImage"
+               Stretch="Fill"
+               SnapsToDevicePixels="True"
+               RenderOptions.BitmapScalingMode="LowQuality"/>
+    </Grid>
+</Window>

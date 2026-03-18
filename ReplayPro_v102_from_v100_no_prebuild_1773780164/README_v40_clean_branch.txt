@@ -1,0 +1,1 @@
+ReplayPro v40 clean branch\n\nFixed:\n- replaced GpuProgramOutputWindow.cs with a clean version\n- uses the 9-argument Vortice D3D11CreateDeviceAndSwapChain overload\n- passes explicit FeatureLevel array and out FeatureLevel\n\nGoal:\n- get the GPU HDMI branch back to a clean compiling base\n

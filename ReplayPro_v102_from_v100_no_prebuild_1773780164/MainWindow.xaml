@@ -1,0 +1,351 @@
+<Window x:Class="ReplayPro.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ReplayPro v102 from v100"
+        Width="1820"
+        Height="980"
+        Background="#1E1E1E">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="44"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="3.2*"/>
+            <ColumnDefinition Width="1.3*"/>
+        </Grid.ColumnDefinitions>
+
+        <Grid Grid.Row="0" Grid.Column="0" Margin="0,0,10,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Margin="5" BorderBrush="#666666" BorderThickness="2" Background="#111111">
+                    <Viewbox Stretch="Uniform">
+                        <Grid Width="1280" Height="720" Background="#111111">
+                            <Image Name="Camera1Preview" Stretch="UniformToFill"/>
+                            <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Background="#303030" Padding="10,4">
+                                <TextBlock Text="CAM 1" Foreground="White" FontWeight="Bold" FontSize="18"/>
+                            </Border>
+                            <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="10" Background="#202020" Padding="14,8">
+                                <TextBlock Name="Cam1TimecodeText" Text="TC: 00:00:00:00" Foreground="White" FontWeight="Bold" FontSize="32"/>
+                            </Border>
+                            <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10" Background="#202020" Padding="14,8">
+                                <TextBlock Name="Cam1InOutText" Text="IN 00:00:00:00 | OUT --:--:--:--" Foreground="White" FontWeight="Bold" FontSize="28"/>
+                            </Border>
+                        </Grid>
+                    </Viewbox>
+                </Border>
+
+                <Border Grid.Column="1" Margin="5" BorderBrush="#666666" BorderThickness="2" Background="#111111">
+                    <Viewbox Stretch="Uniform">
+                        <Grid Width="1280" Height="720" Background="#111111">
+                            <Image Name="Camera2Preview" Stretch="UniformToFill"/>
+                            <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Background="#303030" Padding="10,4">
+                                <TextBlock Text="CAM 2" Foreground="White" FontWeight="Bold" FontSize="18"/>
+                            </Border>
+                            <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="10" Background="#202020" Padding="14,8">
+                                <TextBlock Name="Cam2TimecodeText" Text="TC: 00:00:00:00" Foreground="White" FontWeight="Bold" FontSize="32"/>
+                            </Border>
+                            <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10" Background="#202020" Padding="14,8">
+                                <TextBlock Name="Cam2InOutText" Text="IN 00:00:00:00 | OUT --:--:--:--" Foreground="White" FontWeight="Bold" FontSize="28"/>
+                            </Border>
+                        </Grid>
+                    </Viewbox>
+                </Border>
+
+                <Border Grid.Column="2" Margin="5" BorderBrush="#FFAA33" BorderThickness="2" Background="#111111">
+                    <Viewbox Stretch="Uniform">
+                        <Grid Width="1280" Height="720" Background="#111111">
+                            <Image Name="ProgramCameraPreview" Stretch="UniformToFill"/>
+                            <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Background="#C62828" Padding="10,4">
+                                <TextBlock Text="PROGRAM" Foreground="White" FontWeight="Bold" FontSize="18"/>
+                            </Border>
+                            <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="10" Background="#202020" Padding="12,6">
+                                <TextBlock Name="ProgramTimecodeText" Text="TC: 00:00:00:00" Foreground="White" FontWeight="Bold" FontSize="24"/>
+                            </Border>
+                            <Border HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10" Background="#202020" Padding="10,4">
+                                <TextBlock Name="ProgramFrameCounterText" Text="Frame: Live" Foreground="White" FontWeight="Bold" FontSize="18"/>
+                            </Border>
+                            <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10" Background="#202020" Padding="10,4">
+                                <TextBlock Name="ProgramMarkText" Text="IN 00:00:00:00 | OUT --:--:--:--" Foreground="White" FontSize="16"/>
+                            </Border>
+                            <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="10" Background="#0B57D0" Padding="10,4">
+                                <TextBlock Name="ProgramStateText" Text="LIVE" Foreground="White" FontWeight="Bold" FontSize="18"/>
+                            </Border>
+                            <Border Name="RecordingIndicatorBorder" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10,52,10,10" Background="#B71C1C" Padding="10,4" Visibility="Collapsed">
+                                <TextBlock Name="RecordingIndicatorText" Text="REC" Foreground="White" FontWeight="Bold" FontSize="18"/>
+                            </Border>
+<Border Name="ReplayCountdownBorder" HorizontalAlignment="Center" VerticalAlignment="Center" Background="#AA000000" Padding="26,14" Visibility="Collapsed">
+    <TextBlock Name="ReplayCountdownText" Text="3" Foreground="White" FontWeight="Bold" FontSize="56"/>
+</Border>
+                        </Grid>
+                    </Viewbox>
+                </Border>
+            </Grid>
+
+            <Border Grid.Row="1" Margin="5,0,5,8" BorderBrush="#444444" BorderThickness="1" Background="#252525" Padding="12">
+                <StackPanel>
+                    <TextBlock Text="REPLAY CONTROLS" Foreground="White" FontWeight="Bold" FontSize="18" Margin="0,0,0,10"/>
+
+                    <WrapPanel Margin="0,0,0,10">
+                        <GroupBox Header="JOG" Foreground="White" Margin="4">
+                            <WrapPanel Margin="8">
+                                <Button Name="VirtualJogLeftButton" Content="◀ JOG" Width="100" Height="40" Margin="4" Click="VirtualJogLeftButton_Click"/>
+                                <Button Name="VirtualJogRightButton" Content="JOG ▶" Width="100" Height="40" Margin="4" Click="VirtualJogRightButton_Click"/>
+                            </WrapPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="SHUTTLE" Foreground="White" Margin="4">
+                            <StackPanel Margin="8" Width="340">
+                                <Slider Name="VirtualShuttleSlider"
+                                        Minimum="-8"
+                                        Maximum="8"
+                                        Value="0"
+                                        TickFrequency="1"
+                                        IsSnapToTickEnabled="True"
+                                        TickPlacement="BottomRight"
+                                        ValueChanged="VirtualShuttleSlider_ValueChanged" PreviewMouseLeftButtonUp="VirtualShuttleSlider_PreviewMouseLeftButtonUp"/>
+                                <WrapPanel Margin="0,6,0,0">
+                                    <Button Name="VirtualShuttleStopButton" Content="STOP" Width="90" Height="36" Margin="0,0,8,0" Click="VirtualShuttleStopButton_Click"/>
+                                    <TextBlock Name="VirtualShuttleValueText" Text="0x" Foreground="White" VerticalAlignment="Center"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="MARK" Foreground="White" Margin="4">
+                            <WrapPanel Margin="8">
+                                <Button Name="MarkInButton" Content="MARK IN" Width="110" Height="40" Margin="4" Background="#2E7D32" Foreground="White" Click="MarkIn_Click"/>
+                                <Button Name="MarkOutButton" Content="MARK OUT" Width="110" Height="40" Margin="4" Background="#C62828" Foreground="White" Click="MarkOut_Click"/>
+                                <Button Name="SaveMarkedClipButton" Content="SAVE CLIP" Width="120" Height="40" Margin="4" Background="#1565C0" Foreground="White" Click="SaveMarkedClip_Click"/>
+                            </WrapPanel>
+                        </GroupBox>
+                    </WrapPanel>
+
+                    <WrapPanel>
+                        <GroupBox Header="PLAYBACK" Foreground="White" Margin="4">
+                            <WrapPanel Margin="8">
+                                <Button Name="Speed50Button" Content="50%" Width="80" Height="40" Margin="4" Click="Speed50_Click"/>
+                                <Button Name="Speed100Button" Content="100%" Width="80" Height="40" Margin="4" Click="Speed100_Click"/>
+                                <Button Name="ReplaySelectedButton" Content="PLAY SELECTED" Width="130" Height="40" Margin="4" Click="ReplaySelected_Click"/>
+                                <Button Name="AutoReplayButton" Content="AUTO REPLAY" Width="130" Height="40" Margin="4" Click="AutoReplay_Click"/>
+                                <Button Name="Last5ReplayButton" Content="LAST 5s" Width="100" Height="40" Margin="4" Click="Last5Replay_Click"/>
+                                <Button Name="Last8ReplayButton" Content="LAST 8s" Width="100" Height="40" Margin="4" Click="Last8Replay_Click"/>
+                                <Button Name="Last10ReplayButton" Content="LAST 10s" Width="100" Height="40" Margin="4" Click="Last10Replay_Click"/>
+                            </WrapPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="PROGRAM" Foreground="White" Margin="4">
+                            <WrapPanel Margin="8">
+                                <Button Name="SwitchCameraButton" Content="SWITCH CAM" Width="120" Height="40" Margin="4" Click="SwitchCamera_Click"/>
+                                <Button Name="TakeLiveButton" Content="TAKE LIVE" Width="120" Height="40" Margin="4" Background="#2E7D32" Foreground="White" Click="TakeLive_Click"/>
+                                <Button Name="OpenPgmButton" Content="OPEN PGM" Width="120" Height="40" Margin="4" Click="OpenPgmButton_Click"/>
+                            </WrapPanel>
+                        </GroupBox>
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+
+                <Border Grid.Row="2" Margin="5,0,5,0" BorderBrush="#444444" BorderThickness="1" Background="#252525" Padding="12">
+        <StackPanel>
+            <TextBlock Text="REPLAY TIMELINE" Foreground="White" FontWeight="Bold" FontSize="18" Margin="0,0,0,10"/>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Border Name="ReplayTimelineTrackBorder" Grid.Row="0" Background="Transparent" MouseLeftButtonDown="ReplayTimelineTrack_MouseLeftButtonDown" MouseMove="ReplayTimelineTrack_MouseMove" MouseLeftButtonUp="ReplayTimelineTrack_MouseLeftButtonUp">
+                    <Grid>
+                        <Rectangle Height="14" Fill="#3A3A3A" RadiusX="3" RadiusY="3"/>
+                        <Rectangle Name="LoopABar" Height="14" HorizontalAlignment="Left" Width="0" Fill="#7B1FA2" RadiusX="3" RadiusY="3" Opacity="0.8"/>
+                        <Rectangle Name="ReplayTimelineFill" Height="14" HorizontalAlignment="Left" Width="0" Fill="#1565C0" RadiusX="3" RadiusY="3"/>
+                        <Border Name="ReplayPlayheadMarker"
+                                Width="6"
+                                Height="22"
+                                Background="#FFD54F"
+                                BorderBrush="#111111"
+                                BorderThickness="1"
+                                HorizontalAlignment="Left"
+                                Margin="0,-4,0,0"/>
+                    </Grid>
+                </Border>
+
+                <Grid Grid.Row="1" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Name="ReplayTimelineLeftText" Grid.Column="0" Text="OLD" Foreground="#DDDDDD"/>
+                    <TextBlock Name="ReplayPlayheadText" Grid.Column="1" Text="Playhead: LIVE" Foreground="#DDDDDD" HorizontalAlignment="Center"/>
+                    <TextBlock Name="ReplayTimelineRightText" Grid.Column="2" Text="LIVE" Foreground="#DDDDDD"/>
+                </Grid>
+
+                <WrapPanel Grid.Row="2" Margin="0,8,0,0">
+                    <TextBlock Name="ReplayBufferLengthText" Text="Buffer: 00:00 / 00:00" Foreground="#BBBBBB" Margin="0,0,18,0"/>
+                    <TextBlock Name="LoopRangeText" Text="Loop: A --  B --" Foreground="#BBBBBB" Margin="0,0,18,0"/>
+                    <Button Name="SetLoopAButton" Content="SET A" Width="90" Height="30" Margin="0,0,8,0" Click="SetLoopAButton_Click"/>
+                    <Button Name="SetLoopBButton" Content="SET B" Width="90" Height="30" Margin="0,0,8,0" Click="SetLoopBButton_Click"/>
+                    <Button Name="PlayLoopButton" Content="PLAY LOOP" Width="110" Height="30" Margin="0,0,8,0" Click="PlayLoopButton_Click"/>
+                    <Button Name="StopLoopButton" Content="STOP LOOP" Width="110" Height="30" Click="StopLoopButton_Click"/>
+                </WrapPanel>
+            </Grid>
+        </StackPanel>
+    </Border>
+</Grid>
+
+        <Border Grid.Row="0" Grid.Column="1" Background="#252525" BorderBrush="#444444" BorderThickness="1" Padding="10">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Expander Grid.Row="0"
+                          Header="SETUP / RECORD"
+                          IsExpanded="False"
+                          Foreground="White"
+                          Background="#252525"
+                          BorderBrush="#444444"
+                          BorderThickness="1"
+                          Padding="8"
+                          Margin="0,0,0,10">
+                    <StackPanel Margin="10">
+                        <TextBlock Text="Camera setup" Foreground="White" FontWeight="Bold" Margin="0,0,0,6"/>
+
+                        <WrapPanel Margin="0,0,0,10">
+                            <StackPanel Margin="0,0,10,0">
+                                <TextBlock Text="Camera 1" Foreground="White"/>
+                                <ComboBox Name="Camera1ComboBox" Width="160" Height="30" DisplayMemberPath="Name"/>
+                                <TextBlock Text="Mode 1" Foreground="White" Margin="0,6,0,0"/>
+                                <ComboBox Name="Camera1ModeComboBox" Width="160" Height="30"/>
+                                <TextBlock Name="Camera1ActualModeText" Text="Actual: -" Foreground="#BBBBBB" Margin="0,4,0,0"/>
+                            </StackPanel>
+
+                            <StackPanel Margin="0,0,10,0">
+                                <TextBlock Text="Camera 2" Foreground="White"/>
+                                <ComboBox Name="Camera2ComboBox" Width="160" Height="30" DisplayMemberPath="Name"/>
+                                <TextBlock Text="Mode 2" Foreground="White" Margin="0,6,0,0"/>
+                                <ComboBox Name="Camera2ModeComboBox" Width="160" Height="30"/>
+                                <TextBlock Name="Camera2ActualModeText" Text="Actual: -" Foreground="#BBBBBB" Margin="0,4,0,0"/>
+                            </StackPanel>
+
+                            <Button Name="ApplyCamerasButton" Content="APPLY" Width="100" Height="30" Margin="0,20,0,0" Click="ApplyCameras_Click"/>
+                        </WrapPanel>
+
+                        <TextBlock Text="Replay disk" Foreground="White"/>
+                        <WrapPanel Margin="0,0,0,10">
+                            <TextBox Name="ReplayBufferTextBox" Width="300" Height="30" IsReadOnly="True" Background="#333333" Foreground="White"/>
+                            <Button Name="BrowseReplayBufferButton" Content="BROWSE" Width="100" Height="30" Margin="8,0,0,0" Click="BrowseReplayBufferButton_Click"/>
+                        </WrapPanel>
+
+                        <TextBlock Text="Clip disk" Foreground="White"/>
+                        <WrapPanel Margin="0,0,0,10">
+                            <TextBox Name="ClipStorageTextBox" Width="300" Height="30" IsReadOnly="True" Background="#333333" Foreground="White"/>
+                            <Button Name="BrowseClipStorageButton" Content="BROWSE" Width="100" Height="30" Margin="8,0,0,0" Click="BrowseClipStorageButton_Click"/>
+                        </WrapPanel>
+
+                        <WrapPanel Margin="0,0,0,10">
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="Buffer length" Foreground="White"/>
+                                <ComboBox Name="BufferMinutesComboBox" Width="120" Height="30">
+                                    <ComboBoxItem Content="1"/>
+                                    <ComboBoxItem Content="3"/>
+                                    <ComboBoxItem Content="5"/>
+                                    <ComboBoxItem Content="10"/>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="Recording" Foreground="White"/>
+                                <TextBlock Name="RecordStatusText" Text="REC OFF" Foreground="#DDDDDD" FontWeight="Bold" Margin="0,6,0,0"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="Disk free" Foreground="White"/>
+                                <TextBlock Name="StorageInfoText" Text="Free space: unavailable" Foreground="#DDDDDD" Margin="0,6,0,0"/>
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock Text="Shuttle" Foreground="White"/>
+                                <TextBlock Name="ShuttleStatusText" Text="Shuttle: unknown" Foreground="#DDDDDD" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </WrapPanel>
+
+                        <WrapPanel>
+                            <Button Name="StartRecordButton" Content="START RECORD" Width="150" Height="36" Margin="0,0,8,0" Click="StartRecordButton_Click"/>
+                            <Button Name="StopRecordButton" Content="STOP RECORD" Width="150" Height="36" Margin="0,0,8,0" Click="StopRecordButton_Click"/>
+                            <Button Name="ImportVideoButton" Content="IMPORT VIDEO" Width="140" Height="36" Click="ImportVideo_Click"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Expander>
+
+                <Border Grid.Row="1" Background="#252525" BorderBrush="#444444" BorderThickness="1" Padding="10">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Text="CLIP / MEDIA" Foreground="White" FontSize="18" FontWeight="Bold" Margin="0,0,0,10"/>
+
+                        <ListBox Grid.Row="1"
+                                 Name="ClipListBox"
+                                 Background="#333333"
+                                 Foreground="White"
+                                 SelectionChanged="ClipListBox_SelectionChanged"/>
+
+                        <StackPanel Grid.Row="2" Margin="0,12,0,10">
+                            <TextBlock Text="Notat for valgt klipp (Enter lagrer)" Foreground="White" Margin="0,0,0,4"/>
+                            <TextBox Name="SelectedClipNoteTextBox"
+                                     Height="120"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     Background="#333333"
+                                     Foreground="White"
+                                     KeyDown="SelectedClipNoteTextBox_KeyDown"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="3">
+                            <WrapPanel Margin="0,0,0,10">
+                                <Button Name="ExportSelectedButton" Content="EXPORT" Width="120" Height="36" Margin="0,0,8,0" Click="ExportSelected_Click"/>
+                                <Button Name="DeleteSelectedButton" Content="DELETE" Width="120" Height="36" Click="DeleteSelected_Click"/>
+                            </WrapPanel>
+                            <GroupBox Header="CLIP BANK" Foreground="White">
+                                <WrapPanel Margin="6">
+                                    <Button Name="StoreBank1Button" Content="STORE 1" Width="90" Height="34" Margin="4" Click="StoreBank1_Click"/>
+                                    <Button Name="StoreBank2Button" Content="STORE 2" Width="90" Height="34" Margin="4" Click="StoreBank2_Click"/>
+                                    <Button Name="StoreBank3Button" Content="STORE 3" Width="90" Height="34" Margin="4" Click="StoreBank3_Click"/>
+                                    <Button Name="StoreBank4Button" Content="STORE 4" Width="90" Height="34" Margin="4" Click="StoreBank4_Click"/>
+                                    <Button Name="PlayBank1Button" Content="PLAY 1" Width="90" Height="34" Margin="4" Click="PlayBank1_Click"/>
+                                    <Button Name="PlayBank2Button" Content="PLAY 2" Width="90" Height="34" Margin="4" Click="PlayBank2_Click"/>
+                                    <Button Name="PlayBank3Button" Content="PLAY 3" Width="90" Height="34" Margin="4" Click="PlayBank3_Click"/>
+                                    <Button Name="PlayBank4Button" Content="PLAY 4" Width="90" Height="34" Margin="4" Click="PlayBank4_Click"/>
+                                </WrapPanel>
+                            </GroupBox>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1" Grid.ColumnSpan="2" Background="#2A2A2A" CornerRadius="8" Padding="10" Margin="0,10,0,0">
+            <TextBlock Name="StatusText" Foreground="White" Text="Status: Ready"/>
+        </Border>
+
+        <Border Grid.Row="2" Grid.ColumnSpan="2" Background="#2A2A2A" CornerRadius="8" Padding="10" Margin="0,10,0,0">
+            <TextBlock Name="DebugText" Foreground="#BBBBBB" Text="Debug: Ready"/>
+        </Border>
+    </Grid>
+</Window>
