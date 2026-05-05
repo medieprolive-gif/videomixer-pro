@@ -1,0 +1,163 @@
+{
+  "project_name": "KinoKontroll",
+  "theme_mode": "dark",
+  "archetype": "Hybrid 4 & 5 (Swiss Brutalist Tech + Jewel Luxury Cinematic)",
+  "color_palette": {
+    "background": {
+      "display": "#000000",
+      "main": "#050505",
+      "panel": "#0A0A0A",
+      "card": "#111111"
+    },
+    "border": {
+      "default": "rgba(255, 255, 255, 0.06)",
+      "hover": "rgba(255, 255, 255, 0.15)",
+      "active": "rgba(245, 158, 11, 0.5)"
+    },
+    "brand": {
+      "primary": "#F59E0B",
+      "primary_hover": "#FBBF24",
+      "primary_active": "#D97706",
+      "primary_glow": "rgba(245, 158, 11, 0.2)"
+    },
+    "text": {
+      "primary": "#F4F4F5",
+      "secondary": "#A1A1AA",
+      "tertiary": "#52525B",
+      "inverse": "#000000"
+    },
+    "status": {
+      "danger": "#EF4444",
+      "success": "#10B981"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Outfit, sans-serif",
+      "body": "Manrope, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl tracking-tighter font-semibold text-white",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-medium text-white",
+      "h3": "text-xl font-medium text-white",
+      "ui_label": "text-xs uppercase tracking-[0.15em] text-[#A1A1AA] font-semibold",
+      "timecode": "text-sm font-mono text-[#F59E0B] tracking-wider",
+      "body": "text-base text-[#A1A1AA]"
+    }
+  },
+  "layout_and_spacing": {
+    "global": "Generous spacing around structural containers, but dense tight packing inside functional widgets.",
+    "landing_page": {
+      "style": "Bento Grid (Mode A) with cinematic backdrop.",
+      "container": "max-w-6xl mx-auto px-6 py-20",
+      "grid": "grid-cols-1 md:grid-cols-3 gap-6"
+    },
+    "control_panel": {
+      "style": "Control Room Grid (Mode B). Screen-filling layout (h-screen).",
+      "container": "h-screen w-full flex flex-col bg-[#050505] p-4",
+      "grid": "grid grid-cols-1 md:grid-cols-12 gap-4 h-full",
+      "playlist_col": "col-span-1 md:col-span-4 lg:col-span-3 flex flex-col h-full bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden",
+      "player_col": "col-span-1 md:col-span-8 lg:col-span-9 flex flex-col h-full gap-4"
+    },
+    "display_page": {
+      "style": "Pure canvas.",
+      "container": "w-screen h-screen bg-black overflow-hidden flex items-center justify-center m-0 p-0"
+    }
+  },
+  "surface_strategies": {
+    "cards": "Flat solid background (#0A0A0A), 1px stroke (border-white/10), NO shadow. This gives the 'hardware console' feel.",
+    "glass": "Used strictly for overlays/modals (bg-black/60 backdrop-blur-xl border border-white/10).",
+    "active_item": "For playlist items that are currently playing, use bg-[#111111] with border-l-2 border-l-[#F59E0B] and primary text color for title."
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#F59E0B] text-black hover:bg-[#FBBF24] rounded-md font-medium px-6 py-2 transition-colors duration-150",
+      "secondary": "bg-[#111111] text-white border border-white/10 hover:bg-[#1A1A1A] rounded-md px-6 py-2",
+      "icon": "w-10 h-10 flex items-center justify-center rounded-md bg-[#111111] border border-white/10 hover:border-white/30 text-white transition-colors"
+    },
+    "sliders": "Tailwind customized radix/shadcn slider. Track bg-white/10, Range bg-[#F59E0B], Thumb w-4 h-4 rounded-full bg-white border-2 border-[#F59E0B].",
+    "inputs": "bg-[#050505] border border-white/10 text-white rounded-md px-4 py-2 focus:outline-none focus:border-[#F59E0B] focus:ring-1 focus:ring-[#F59E0B]"
+  },
+  "motion": {
+    "transitions": "Fast, hardware-like snappy transitions (duration-150 ease-out) for all buttons and hovers.",
+    "display_idle": "Subtle pulse animation on the idle cinema icon (animate-pulse, opacity 10% to 30%).",
+    "now_playing": "Animate an audio wave or simple breathing dot in gold next to the currently playing track."
+  },
+  "media": {
+    "images": [
+      {
+        "category": "hero_background",
+        "url": "https://images.unsplash.com/photo-1760170437237-a3654545ab4c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwxfHxjaW5lbWElMjB0aGVhdGVyJTIwZGFyayUyMGVtcHR5JTIwc2NyZWVufGVufDB8fHx8MTc3Nzk5NTkxOXww&ixlib=rb-4.1.0&q=85",
+        "description": "Empty vintage cinema hall. Must be heavily overlaid (bg-black/80) so it feels like a subtle cinematic texture behind the landing cards."
+      }
+    ],
+    "icons": {
+      "library": "lucide-react",
+      "usage": "Use Monitor for display route, UploadCloud for upload, Sliders or Radio for control. Play, Pause, SkipForward, SkipBack, Repeat, Volume2, VolumeX for playback."
+    }
+  },
+  "language_config": {
+    "locale": "no-NO",
+    "strings": {
+      "app_name": "KinoKontroll",
+      "app_desc": "Profesjonelt avspillingssystem for video",
+      "nav": {
+        "display": "Visningsskjerm",
+        "upload": "Last opp",
+        "control": "Kontrollpanel"
+      },
+      "descriptions": {
+        "display": "Fullskjermsvisning uten grensesnitt. Åpne på ekstern skjerm.",
+        "upload": "Last inn nye videoklipp til systemet.",
+        "control": "Styr avspilling, volum og spillelister i sanntid."
+      },
+      "login": {
+        "title": "Autentisering kreves",
+        "placeholder": "Skriv inn passord...",
+        "button": "Lås opp tilgang"
+      },
+      "upload": {
+        "dropzone": "Dra og slipp videofiler her, eller klikk for å velge",
+        "uploading": "Laster opp...",
+        "delete": "Slett",
+        "empty": "Ingen videoer lastet opp enda."
+      },
+      "control": {
+        "now_playing": "SPILLER NÅ",
+        "playlist": "SPILLELISTE",
+        "volume": "VOLUM",
+        "duration": "VARIGHET",
+        "loop": "GJENTA"
+      }
+    }
+  },
+  "testing": {
+    "data_testids": [
+      "nav-display-link",
+      "nav-upload-link",
+      "nav-control-link",
+      "login-password-input",
+      "login-submit-button",
+      "upload-dropzone",
+      "upload-clip-item",
+      "upload-delete-button",
+      "control-play-pause-button",
+      "control-next-button",
+      "control-prev-button",
+      "control-timeline-slider",
+      "control-volume-slider",
+      "control-loop-toggle",
+      "control-playlist-item"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Install `lucide-react` for icons.",
+    "Add Google Fonts: Outfit (headings), Manrope (body), JetBrains Mono (timecodes/mono).",
+    "Strictly follow the color palette. Do not invent new gradients. Stick to the flat, hardware-like console aesthetic.",
+    "For the display route (/display), ensure it's pure black (`bg-black`) and hides the mouse cursor if possible when idle. No scrollbars.",
+    "For the layout grids, use CSS grid or Tailwind grid utilities exactly as specified. Do not use generic Shadcn Card layouts for the main control panel structure.",
+    "Implement WebSocket or similar state synchronization mechanism as required by the problem statement so the control panel updates the display page in real-time.",
+    "Ensure all interactive elements have the correct `data-testid`."
+  ]
+}
