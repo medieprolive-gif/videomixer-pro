@@ -47,12 +47,28 @@ export default function Upload() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      await api.post("/videos/upload", fd, {
+      const res = await api.post("/videos/upload", fd, {
         headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
         onUploadProgress: (ev) => {
           if (ev.total) setProgress(Math.round((ev.loaded / ev.total) * 100));
         },
       });
+      const videoId = res.data?.id;
+
+      // Best-effort thumbnail extraction in the browser
+      try {
+        const thumb = await captureThumbnail(file);
+        if (thumb && videoId) {
+          const tfd = new FormData();
+          tfd.append("file", thumb, "thumb.jpg");
+          await api.post(`/videos/${videoId}/thumbnail`, tfd, {
+            headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
+          });
+        }
+      } catch (_) {
+        /* thumbnail is best-effort; ignore failures */
+      }
+
       toast.success(`${file.name} lastet opp`);
       await load();
     } catch (err) {
@@ -206,10 +222,19 @@ export default function Upload() {
                 <li
                   key={v.id}
                   data-testid="upload-clip-item"
-                  className="flex items-center gap-4 px-5 py-4 hover:bg-[#111111] transition-colors"
+                  className="flex items-center gap-4 px-5 py-3 hover:bg-[#111111] transition-colors"
                 >
-                  <div className="w-10 h-10 rounded-md bg-black/60 border border-white/10 flex items-center justify-center">
-                    <Film className="w-4 h-4 text-[#F59E0B]" />
+                  <div className="w-16 h-10 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                    {v.has_thumbnail ? (
+                      <img
+                        src={thumbUrl(v.id)}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <Film className="w-4 h-4 text-[#F59E0B]" />
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-white text-sm truncate">{v.filename}</div>

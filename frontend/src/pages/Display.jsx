@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
 import { Film } from "lucide-react";
 import { useSync } from "../lib/useSync";
 import { streamUrl } from "../lib/api";
 
 export default function Display() {
-  const { state } = useSync();
+  const { room } = useParams();
+  const roomId = room || "default";
+  const { state, sendPublic } = useSync(roomId);
   const videoRef = useRef(null);
   const [currentSrcId, setCurrentSrcId] = useState(null);
   const [showCursor, setShowCursor] = useState(false);
@@ -40,6 +43,20 @@ export default function Display() {
       }
     }
   }, [state, currentSrcId]);
+
+  // Auto-advance: when video ends and loop is OFF, ask backend to play next.
+  // (When loop is ON, the video element loops natively and `ended` doesn't fire.)
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onEnded = () => {
+      if (state?.current_video_id) {
+        sendPublic({ action: "ended", video_id: state.current_video_id });
+      }
+    };
+    v.addEventListener("ended", onEnded);
+    return () => v.removeEventListener("ended", onEnded);
+  }, [state?.current_video_id, sendPublic]);
 
   // Apply playback state
   useEffect(() => {
@@ -97,6 +114,9 @@ export default function Display() {
           </div>
           <div className="text-xs uppercase tracking-[0.3em] text-zinc-600">
             Venter på avspilling
+          </div>
+          <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
+            Sal · {roomId}
           </div>
         </div>
       )}

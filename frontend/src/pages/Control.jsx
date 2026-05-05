@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   Play,
@@ -16,7 +16,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api, clearToken, streamUrl } from "../lib/api";
+import { api, clearToken, streamUrl, thumbUrl } from "../lib/api";
 import { useSync } from "../lib/useSync";
 
 function formatTime(s) {
@@ -27,13 +27,15 @@ function formatTime(s) {
 }
 
 export default function Control() {
+  const { room } = useParams();
+  const roomId = room || "default";
   const [videos, setVideos] = useState([]);
   const [duration, setDuration] = useState(0);
   const [localTime, setLocalTime] = useState(0);
   const [seeking, setSeeking] = useState(false);
   const probeRef = useRef(null);
   const navigate = useNavigate();
-  const { state, connected, send } = useSync();
+  const { state, connected, send } = useSync(roomId);
 
   const loadVideos = async () => {
     try {
@@ -131,6 +133,8 @@ export default function Control() {
           <div className="hidden sm:flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-zinc-600">
             <Radio className="w-3 h-3" />
             <span className="text-[#F59E0B]">Kontrollpanel</span> · /control
+            <span className="text-zinc-700">·</span>
+            <span className="font-mono text-zinc-500" data-testid="control-room-label">sal: {roomId}</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -151,7 +155,7 @@ export default function Control() {
             )}
           </div>
           <a
-            href="/display"
+            href={roomId === "default" ? "/display" : `/display/${roomId}`}
             target="_blank"
             rel="noreferrer"
             data-testid="control-open-display-link"
@@ -201,18 +205,29 @@ export default function Control() {
                       <button
                         onClick={() => send({ action: "select", video_id: v.id })}
                         data-testid="control-playlist-item"
-                        className={`w-full text-left px-4 py-3 flex items-center gap-3 border-l-2 transition-colors ${
+                        className={`w-full text-left px-3 py-2.5 flex items-center gap-3 border-l-2 transition-colors ${
                           active
                             ? "bg-[#111111] border-l-[#F59E0B]"
                             : "border-l-transparent hover:bg-[#0E0E0E]"
                         }`}
                       >
-                        <div className="font-mono text-xs text-zinc-600 w-6">
+                        <div className="font-mono text-xs text-zinc-600 w-5 shrink-0">
                           {String(i + 1).padStart(2, "0")}
                         </div>
-                        <Film
-                          className={`w-4 h-4 shrink-0 ${active ? "text-[#F59E0B]" : "text-zinc-600"}`}
-                        />
+                        <div className="w-12 h-8 rounded bg-black/60 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
+                          {v.has_thumbnail ? (
+                            <img
+                              src={thumbUrl(v.id)}
+                              alt=""
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <Film
+                              className={`w-3.5 h-3.5 ${active ? "text-[#F59E0B]" : "text-zinc-600"}`}
+                            />
+                          )}
+                        </div>
                         <div className="flex-1 min-w-0">
                           <div
                             className={`text-sm truncate ${active ? "text-[#F59E0B]" : "text-zinc-300"}`}
@@ -221,7 +236,7 @@ export default function Control() {
                           </div>
                         </div>
                         {active && isPlaying && (
-                          <div className="flex items-end gap-0.5 h-4">
+                          <div className="flex items-end gap-0.5 h-4 shrink-0">
                             <span className="w-0.5 bg-[#F59E0B] animate-pulse" style={{ height: "60%" }} />
                             <span className="w-0.5 bg-[#F59E0B] animate-pulse" style={{ height: "100%", animationDelay: "120ms" }} />
                             <span className="w-0.5 bg-[#F59E0B] animate-pulse" style={{ height: "40%", animationDelay: "240ms" }} />
@@ -251,16 +266,33 @@ export default function Control() {
             </div>
             <div className="flex-1 min-h-0 flex items-center justify-center bg-black rounded-md border border-white/5 mb-4 overflow-hidden">
               {currentVideo ? (
-                <div className="text-center">
-                  <Film className="w-10 h-10 text-[#F59E0B] mx-auto mb-3" strokeWidth={1.5} />
-                  <div
-                    className="font-heading text-xl text-white mb-1 max-w-md truncate"
-                    data-testid="control-now-playing-title"
-                  >
-                    {currentVideo.filename}
-                  </div>
-                  <div className="font-mono text-xs text-zinc-600 tracking-wider">
-                    {currentVideo.content_type}
+                <div className="relative w-full h-full flex items-center justify-center">
+                  {currentVideo.has_thumbnail && (
+                    <img
+                      src={thumbUrl(currentVideo.id)}
+                      alt=""
+                      className="absolute inset-0 w-full h-full object-cover opacity-30 blur-sm"
+                    />
+                  )}
+                  <div className="relative text-center px-6">
+                    {currentVideo.has_thumbnail ? (
+                      <img
+                        src={thumbUrl(currentVideo.id)}
+                        alt=""
+                        className="w-32 h-20 object-cover rounded border border-white/10 mx-auto mb-4"
+                      />
+                    ) : (
+                      <Film className="w-10 h-10 text-[#F59E0B] mx-auto mb-3" strokeWidth={1.5} />
+                    )}
+                    <div
+                      className="font-heading text-xl text-white mb-1 max-w-md truncate"
+                      data-testid="control-now-playing-title"
+                    >
+                      {currentVideo.filename}
+                    </div>
+                    <div className="font-mono text-xs text-zinc-600 tracking-wider">
+                      {currentVideo.content_type}
+                    </div>
                   </div>
                 </div>
               ) : (

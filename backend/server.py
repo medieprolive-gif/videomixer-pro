@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Header, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -85,7 +86,20 @@ def open_object_stream(path: str, range_header: Optional[str] = None):
 
 
 # ---------- App ----------
-app = FastAPI(title="KinoKontroll API")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        await asyncio.to_thread(init_storage)
+        logger.info("Storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+    # Ensure default room state exists
+    await get_state_doc(DEFAULT_ROOM)
+    yield
+    client.close()
+
+
+app = FastAPI(title="KinoKontroll API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
 
@@ -143,6 +157,7 @@ class VideoOut(BaseModel):
     content_type: str
     size: int
     created_at: str
+    has_thumbnail: bool = False
 
 
 @api_router.post("/videos/upload", response_model=VideoOut)
@@ -198,7 +213,71 @@ async def upload_video(file: UploadFile = File(...), _: bool = Depends(require_a
 @api_router.get("/videos", response_model=List[VideoOut])
 async def list_videos():
     items = await db.videos.find({"is_deleted": False}, {"_id": 0}).sort("created_at", 1).to_list(1000)
-    return [VideoOut(**i) for i in items]
+    out = []
+    for i in items:
+        i["has_thumbnail"] = bool(i.get("thumbnail_path"))
+        out.append(VideoOut(**i))
+    return out
+
+
+@api_router.post("/videos/{video_id}/thumbnail")
+async def upload_thumbnail(video_id: str, file: UploadFile = File(...), _: bool = Depends(require_auth)):
+    record = await db.videos.find_one({"id": video_id, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="Video ikke funnet")
+
+    underlying = file.file
+    underlying.seek(0, 2)
+    size = underlying.tell()
+    underlying.seek(0)
+    if size <= 0 or size > 4 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Ugyldig miniatyr")
+
+    content_type = file.content_type or "image/jpeg"
+    ext = "jpg" if "jpeg" in content_type else (content_type.split("/")[-1] or "jpg")
+    thumb_path = f"{APP_NAME}/thumbnails/{video_id}.{ext}"
+
+    try:
+        result = await asyncio.to_thread(put_object_stream, thumb_path, underlying, content_type, size)
+    except Exception as e:
+        logger.error(f"Thumb upload failed: {e}")
+        raise HTTPException(status_code=500, detail="Lagring av miniatyr feilet")
+
+    await db.videos.update_one(
+        {"id": video_id},
+        {"$set": {"thumbnail_path": result["path"], "thumbnail_content_type": content_type}},
+    )
+    return {"ok": True, "path": result["path"]}
+
+
+@api_router.get("/videos/{video_id}/thumbnail")
+async def get_thumbnail(video_id: str):
+    record = await db.videos.find_one({"id": video_id, "is_deleted": False}, {"_id": 0})
+    if not record or not record.get("thumbnail_path"):
+        raise HTTPException(status_code=404, detail="Ingen miniatyr")
+    media_type = record.get("thumbnail_content_type") or "image/jpeg"
+    try:
+        resp = await asyncio.to_thread(open_object_stream, record["thumbnail_path"], None)
+    except Exception as e:
+        logger.error(f"Thumb fetch failed: {e}")
+        raise HTTPException(status_code=500, detail="Klarte ikke hente miniatyr")
+
+    headers_out = {"Cache-Control": "public, max-age=86400"}
+    if "Content-Length" in resp.headers:
+        headers_out["Content-Length"] = resp.headers["Content-Length"]
+
+    def gen():
+        try:
+            for c in resp.iter_content(chunk_size=STREAM_CHUNK):
+                if c:
+                    yield c
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(gen(), media_type=media_type, headers=headers_out)
 
 
 @api_router.delete("/videos/{video_id}")
@@ -206,14 +285,16 @@ async def delete_video(video_id: str, _: bool = Depends(require_auth)):
     res = await db.videos.update_one({"id": video_id}, {"$set": {"is_deleted": True}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Video ikke funnet")
-    # If deleted video is current, clear it
-    state = await get_state_doc()
-    if state.get("current_video_id") == video_id:
-        state["current_video_id"] = None
-        state["is_playing"] = False
-        state["current_time"] = 0
-        await save_state(state)
-        await broadcast_state(state)
+    # If the deleted clip is currently playing in any room, clear & broadcast.
+    rooms = await db.playback_state.distinct("id")
+    for room in rooms or [DEFAULT_ROOM]:
+        state = await get_state_doc(room)
+        if state.get("current_video_id") == video_id:
+            state["current_video_id"] = None
+            state["is_playing"] = False
+            state["current_time"] = 0
+            await save_state(state, room)
+            await broadcast_state(state, room)
     return {"ok": True}
 
 
@@ -337,56 +418,85 @@ async def stream_video(video_id: str, request: Request):
     return StreamingResponse(full_stream(), status_code=200, media_type=media_type, headers=headers_out)
 
 
-# ---------- Playback state (single shared room) ----------
-DEFAULT_STATE: Dict[str, Any] = {
-    "id": "global",
-    "current_video_id": None,
-    "is_playing": False,
-    "current_time": 0.0,
-    "volume": 1.0,
-    "muted": False,
-    "loop": False,
-    "updated_at": datetime.now(timezone.utc).isoformat(),
-}
+# ---------- Playback state (per-room) ----------
+DEFAULT_ROOM = "default"
 
 
-async def get_state_doc() -> Dict[str, Any]:
-    s = await db.playback_state.find_one({"id": "global"}, {"_id": 0})
+def _default_state(room: str) -> Dict[str, Any]:
+    return {
+        "id": room,
+        "current_video_id": None,
+        "is_playing": False,
+        "current_time": 0.0,
+        "volume": 1.0,
+        "muted": False,
+        "loop": False,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _normalize_room(room: Optional[str]) -> str:
+    r = (room or "").strip().lower()
+    if not r:
+        return DEFAULT_ROOM
+    # Limit to safe slug chars
+    safe = "".join(c for c in r if c.isalnum() or c in ("-", "_"))[:32]
+    return safe or DEFAULT_ROOM
+
+
+async def get_state_doc(room: str) -> Dict[str, Any]:
+    room = _normalize_room(room)
+    s = await db.playback_state.find_one({"id": room}, {"_id": 0})
     if not s:
-        s = DEFAULT_STATE.copy()
+        s = _default_state(room)
         await db.playback_state.insert_one(s.copy())
     return s
 
 
-async def save_state(state: Dict[str, Any]):
+async def save_state(state: Dict[str, Any], room: str):
+    room = _normalize_room(room)
+    state["id"] = room
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.playback_state.update_one({"id": "global"}, {"$set": state}, upsert=True)
+    await db.playback_state.update_one({"id": room}, {"$set": state}, upsert=True)
+
+
+async def list_rooms() -> List[str]:
+    rooms = await db.playback_state.distinct("id")
+    return rooms or [DEFAULT_ROOM]
 
 
 @api_router.get("/state")
-async def get_state():
-    return await get_state_doc()
+async def get_state(room: str = Query(DEFAULT_ROOM)):
+    return await get_state_doc(room)
+
+
+@api_router.get("/rooms")
+async def get_rooms():
+    return {"rooms": await list_rooms()}
 
 
 # ---------- WebSocket sync ----------
 class ConnectionManager:
+    """Tracks connected sockets per room."""
+
     def __init__(self):
-        self.active: List[WebSocket] = []
+        self.rooms: Dict[str, List[WebSocket]] = {}
         self._lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket, room: str):
         await ws.accept()
         async with self._lock:
-            self.active.append(ws)
+            self.rooms.setdefault(room, []).append(ws)
 
-    async def disconnect(self, ws: WebSocket):
+    async def disconnect(self, ws: WebSocket, room: str):
         async with self._lock:
-            if ws in self.active:
-                self.active.remove(ws)
+            sockets = self.rooms.get(room, [])
+            if ws in sockets:
+                sockets.remove(ws)
 
-    async def broadcast(self, message: Dict[str, Any]):
+    async def broadcast(self, message: Dict[str, Any], room: str):
         async with self._lock:
-            sockets = list(self.active)
+            sockets = list(self.rooms.get(room, []))
         dead = []
         for s in sockets:
             try:
@@ -395,28 +505,67 @@ class ConnectionManager:
                 dead.append(s)
         if dead:
             async with self._lock:
+                live = self.rooms.get(room, [])
                 for s in dead:
-                    if s in self.active:
-                        self.active.remove(s)
+                    if s in live:
+                        live.remove(s)
+
+    async def broadcast_all(self, message: Dict[str, Any]):
+        async with self._lock:
+            rooms = list(self.rooms.keys())
+        for r in rooms:
+            await self.broadcast(message, r)
 
 
 manager = ConnectionManager()
 
 
-async def broadcast_state(state: Dict[str, Any]):
-    await manager.broadcast({"type": "state", "state": state})
+async def broadcast_state(state: Dict[str, Any], room: str):
+    await manager.broadcast({"type": "state", "state": state}, room)
 
 
-VALID_ACTIONS = {"play", "pause", "toggle", "next", "prev", "select", "seek", "volume", "mute", "loop", "time_update"}
+VALID_ACTIONS = {"play", "pause", "toggle", "next", "prev", "select", "seek", "volume", "mute", "loop", "time_update", "ended"}
+# Actions that are passively reported by the (unauthenticated) display page.
+PUBLIC_ACTIONS = {"ended"}
+
+
+async def _advance_to_next(state: Dict[str, Any], ids: List[str], from_id: Optional[str]) -> Dict[str, Any]:
+    """Advance playback to the next clip after `from_id`. Stops if at the end and no loop."""
+    if not ids:
+        state["current_video_id"] = None
+        state["is_playing"] = False
+        state["current_time"] = 0
+        return state
+    if from_id in ids:
+        idx = ids.index(from_id)
+        if idx + 1 < len(ids):
+            state["current_video_id"] = ids[idx + 1]
+            state["current_time"] = 0
+            state["is_playing"] = True
+        else:
+            # Reached the end of the playlist
+            if state.get("loop"):
+                state["current_video_id"] = ids[0]
+                state["current_time"] = 0
+                state["is_playing"] = True
+            else:
+                state["is_playing"] = False
+                state["current_time"] = 0
+    else:
+        state["current_video_id"] = ids[0]
+        state["current_time"] = 0
+        state["is_playing"] = True
+    return state
 
 
 @app.websocket("/api/ws")
-async def websocket_endpoint(ws: WebSocket):
-    # Accept all; control actions require token
-    await manager.connect(ws)
+async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
+    room = _normalize_room(room)
+    # Accept all; control actions require token, display passive actions are public
+    await manager.connect(ws, room)
     try:
         # Send current state on connect
-        s = await get_state_doc()
+        s = await get_state_doc(room)
         await ws.send_json({"type": "state", "state": s})
 
         while True:
@@ -430,13 +579,14 @@ async def websocket_endpoint(ws: WebSocket):
             if action not in VALID_ACTIONS:
                 continue
 
-            # Auth check for control actions (display only listens, doesn't send)
-            token = msg.get("token")
-            if not token or not verify_token(token):
-                await ws.send_json({"type": "error", "error": "unauthorized"})
-                continue
+            # Auth gate (display-only "ended" is allowed without token)
+            if action not in PUBLIC_ACTIONS:
+                token = msg.get("token")
+                if not token or not verify_token(token):
+                    await ws.send_json({"type": "error", "error": "unauthorized"})
+                    continue
 
-            state = await get_state_doc()
+            state = await get_state_doc(room)
             videos = await db.videos.find({"is_deleted": False}, {"_id": 0}).sort("created_at", 1).to_list(1000)
             ids = [v["id"] for v in videos]
 
@@ -453,19 +603,21 @@ async def websocket_endpoint(ws: WebSocket):
                     state["current_video_id"] = ids[0]
                     state["current_time"] = 0
             elif action == "next":
-                if state.get("current_video_id") in ids:
-                    idx = ids.index(state["current_video_id"])
-                    next_idx = (idx + 1) % len(ids) if ids else 0
-                    state["current_video_id"] = ids[next_idx] if ids else None
+                cur = state.get("current_video_id")
+                if cur in ids:
+                    idx = ids.index(cur)
+                    next_idx = (idx + 1) % len(ids)
+                    state["current_video_id"] = ids[next_idx]
                 elif ids:
                     state["current_video_id"] = ids[0]
                 state["current_time"] = 0
                 state["is_playing"] = True
             elif action == "prev":
-                if state.get("current_video_id") in ids:
-                    idx = ids.index(state["current_video_id"])
-                    prev_idx = (idx - 1) % len(ids) if ids else 0
-                    state["current_video_id"] = ids[prev_idx] if ids else None
+                cur = state.get("current_video_id")
+                if cur in ids:
+                    idx = ids.index(cur)
+                    prev_idx = (idx - 1) % len(ids)
+                    state["current_video_id"] = ids[prev_idx]
                 elif ids:
                     state["current_video_id"] = ids[0]
                 state["current_time"] = 0
@@ -489,36 +641,25 @@ async def websocket_endpoint(ws: WebSocket):
             elif action == "loop":
                 state["loop"] = bool(msg.get("loop", not state.get("loop", False)))
             elif action == "time_update":
-                # Display reports current time so control timeline stays in sync
                 t = msg.get("time")
                 if isinstance(t, (int, float)):
                     state["current_time"] = float(max(0, t))
+            elif action == "ended":
+                # Display reports the playing video ended. Confirm it's the current one,
+                # then auto-advance (or stop). Browser handles loop natively when loop flag is on,
+                # so this won't fire when loop is enabled.
+                ended_id = msg.get("video_id")
+                if ended_id == state.get("current_video_id"):
+                    state = await _advance_to_next(state, ids, ended_id)
 
-            await save_state(state)
-            await broadcast_state(state)
+            await save_state(state, room)
+            await broadcast_state(state, room)
 
     except WebSocketDisconnect:
-        await manager.disconnect(ws)
+        await manager.disconnect(ws, room)
     except Exception as e:
         logger.error(f"WS error: {e}")
-        await manager.disconnect(ws)
-
-
-# ---------- Lifecycle ----------
-@app.on_event("startup")
-async def startup():
-    try:
-        init_storage()
-        logger.info("Storage initialized")
-    except Exception as e:
-        logger.error(f"Storage init failed: {e}")
-    # Ensure state doc
-    await get_state_doc()
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    client.close()
+        await manager.disconnect(ws, room)
 
 
 # Register router

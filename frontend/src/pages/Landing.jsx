@@ -1,34 +1,42 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Monitor, UploadCloud, Sliders, ArrowUpRight, Film } from "lucide-react";
 
 const NAV = [
   {
-    to: "/display",
+    to: (room) => (room ? `/display/${room}` : "/display"),
     label: "Visningsskjerm",
     desc: "Fullskjermsvisning uten grensesnitt. Åpne på ekstern skjerm.",
     icon: Monitor,
     testid: "nav-display-link",
-    path: "/display",
+    path: (room) => (room ? `/display/${room}` : "/display"),
   },
   {
-    to: "/upload",
+    to: () => "/upload",
     label: "Last opp",
-    desc: "Last inn nye videoklipp til systemet.",
+    desc: "Last inn nye videoklipp til systemet (delt bibliotek).",
     icon: UploadCloud,
     testid: "nav-upload-link",
-    path: "/upload",
+    path: () => "/upload",
   },
   {
-    to: "/control",
+    to: (room) => (room ? `/control/${room}` : "/control"),
     label: "Kontrollpanel",
     desc: "Styr avspilling, volum og spillelister i sanntid.",
     icon: Sliders,
     testid: "nav-control-link",
-    path: "/control",
+    path: (room) => (room ? `/control/${room}` : "/control"),
   },
 ];
 
 export default function Landing() {
+  const [room, setRoom] = useState("");
+  const cleanRoom = room
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 32);
+
   return (
     <div className="relative min-h-screen w-full overflow-hidden">
       <div
@@ -49,7 +57,7 @@ export default function Landing() {
             </div>
             <div className="leading-tight">
               <div className="font-heading text-lg font-semibold tracking-tight text-white">KinoKontroll</div>
-              <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">v1.0 · Norge</div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">v1.1 · Norge</div>
             </div>
           </div>
           <div className="hidden sm:flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-zinc-500">
@@ -58,7 +66,7 @@ export default function Landing() {
           </div>
         </header>
 
-        <section className="mb-16 sm:mb-20" data-testid="landing-hero">
+        <section className="mb-12 sm:mb-16" data-testid="landing-hero">
           <div className="text-xs uppercase tracking-[0.3em] text-[#F59E0B] mb-4">
             Profesjonelt avspillingssystem
           </div>
@@ -73,30 +81,57 @@ export default function Landing() {
           </p>
         </section>
 
+        {/* Room selector */}
+        <section className="mb-10 max-w-md" data-testid="landing-room-selector">
+          <label className="block text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-2">
+            Sal / Skjerm
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={room}
+              onChange={(e) => setRoom(e.target.value)}
+              placeholder="default"
+              data-testid="landing-room-input"
+              className="flex-1 bg-[#050505] border border-white/10 text-white rounded-md px-3 py-2 focus:outline-none focus:border-[#F59E0B] focus:ring-1 focus:ring-[#F59E0B] placeholder:text-zinc-700 font-mono text-sm"
+            />
+            <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-600 font-mono">
+              {cleanRoom || "default"}
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-zinc-600">
+            La være tom for hovedsal. Bruk f.eks. <span className="font-mono text-zinc-500">sal-1</span> for å styre flere lokasjoner uavhengig.
+          </p>
+        </section>
+
         <section
           className="grid grid-cols-1 md:grid-cols-3 gap-5"
           data-testid="landing-nav-grid"
         >
-          {NAV.map(({ to, label, desc, icon: Icon, testid, path }) => (
-            <Link
-              key={to}
-              to={to}
-              data-testid={testid}
-              className="group relative bg-[#0A0A0A] border border-white/10 rounded-lg p-6 hover:border-[#F59E0B]/50 transition-colors duration-150"
-            >
-              <div className="flex items-start justify-between mb-10">
-                <div className="w-10 h-10 rounded-md bg-[#111111] border border-white/10 flex items-center justify-center group-hover:border-[#F59E0B]/40 transition-colors">
-                  <Icon className="w-5 h-5 text-[#F59E0B]" strokeWidth={1.8} />
+          {NAV.map(({ to, label, desc, icon: Icon, testid, path }) => {
+            const target = to(cleanRoom);
+            const display = path(cleanRoom);
+            return (
+              <Link
+                key={display}
+                to={target}
+                data-testid={testid}
+                className="group relative bg-[#0A0A0A] border border-white/10 rounded-lg p-6 hover:border-[#F59E0B]/50 transition-colors duration-150"
+              >
+                <div className="flex items-start justify-between mb-10">
+                  <div className="w-10 h-10 rounded-md bg-[#111111] border border-white/10 flex items-center justify-center group-hover:border-[#F59E0B]/40 transition-colors">
+                    <Icon className="w-5 h-5 text-[#F59E0B]" strokeWidth={1.8} />
+                  </div>
+                  <ArrowUpRight className="w-4 h-4 text-zinc-600 group-hover:text-[#F59E0B] transition-colors" />
                 </div>
-                <ArrowUpRight className="w-4 h-4 text-zinc-600 group-hover:text-[#F59E0B] transition-colors" />
-              </div>
-              <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-2">
-                {path}
-              </div>
-              <div className="font-heading text-xl font-medium text-white mb-2">{label}</div>
-              <p className="text-sm text-zinc-500 leading-relaxed">{desc}</p>
-            </Link>
-          ))}
+                <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-2 font-mono">
+                  {display}
+                </div>
+                <div className="font-heading text-xl font-medium text-white mb-2">{label}</div>
+                <p className="text-sm text-zinc-500 leading-relaxed">{desc}</p>
+              </Link>
+            );
+          })}
         </section>
 
         <footer className="mt-16 pt-8 border-t border-white/5 flex items-center justify-between text-xs text-zinc-600">

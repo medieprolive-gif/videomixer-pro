@@ -16,6 +16,7 @@ function App() {
           <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
           <Route path="/display" element={<Display />} />
+          <Route path="/display/:room" element={<Display />} />
           <Route
             path="/upload"
             element={
@@ -26,6 +27,14 @@ function App() {
           />
           <Route
             path="/control"
+            element={
+              <ProtectedRoute>
+                <Control />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/control/:room"
             element={
               <ProtectedRoute>
                 <Control />

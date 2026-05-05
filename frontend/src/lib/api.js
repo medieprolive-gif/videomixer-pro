@@ -22,10 +22,12 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-export const wsUrl = () => {
+export const wsUrl = (room) => {
   const url = new URL(BACKEND_URL);
   const protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${url.host}/api/ws`;
+  const r = encodeURIComponent(room || "default");
+  return `${protocol}//${url.host}/api/ws?room=${r}`;
 };
 
 export const streamUrl = (videoId) => `${API}/videos/${videoId}/stream`;
+export const thumbUrl = (videoId) => `${API}/videos/${videoId}/thumbnail`;
