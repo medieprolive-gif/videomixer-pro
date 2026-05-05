@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Header, Query, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -30,6 +30,8 @@ JWT_SECRET = os.environ['JWT_SECRET']
 APP_NAME = os.environ.get('APP_NAME', 'kinokontroll')
 EMERGENT_KEY = os.environ.get('EMERGENT_LLM_KEY')
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+MAX_UPLOAD_MB = int(os.environ.get('MAX_UPLOAD_MB', '500'))
+STREAM_CHUNK = 64 * 1024  # 64 KB
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -48,25 +50,38 @@ def init_storage() -> str:
     return storage_key
 
 
-def put_object(path: str, data: bytes, content_type: str) -> dict:
+def put_object_stream(path: str, file_obj, content_type: str, content_length: int) -> dict:
+    """Stream a file-like object to storage without loading it fully into memory."""
     key = init_storage()
+    headers = {
+        "X-Storage-Key": key,
+        "Content-Type": content_type,
+        "Content-Length": str(content_length),
+    }
     resp = requests.put(
         f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data, timeout=300,
+        headers=headers,
+        data=file_obj,
+        timeout=600,
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def get_object(path: str) -> tuple[bytes, str]:
+def open_object_stream(path: str, range_header: Optional[str] = None):
+    """Open a streaming GET to storage. Returns the live requests.Response."""
     key = init_storage()
+    headers = {"X-Storage-Key": key}
+    if range_header:
+        headers["Range"] = range_header
     resp = requests.get(
         f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key}, timeout=120,
+        headers=headers,
+        stream=True,
+        timeout=120,
     )
     resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    return resp
 
 
 # ---------- App ----------
@@ -141,10 +156,28 @@ async def upload_video(file: UploadFile = File(...), _: bool = Depends(require_a
     ext = (file.filename or "video.mp4").split(".")[-1]
     video_id = str(uuid.uuid4())
     storage_path = f"{APP_NAME}/videos/{video_id}.{ext}"
-    data = await file.read()
+    content_type = file.content_type or "video/mp4"
+
+    # Determine size without reading the whole file into memory.
+    underlying = file.file
+    underlying.seek(0, 2)  # seek to end
+    size = underlying.tell()
+    underlying.seek(0)
+
+    if size <= 0:
+        raise HTTPException(status_code=400, detail="Tom fil")
+    if size > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Filen er for stor (maks {MAX_UPLOAD_MB} MB)",
+        )
 
     try:
-        result = put_object(storage_path, data, file.content_type or "video/mp4")
+        # Stream the SpooledTemporaryFile directly to storage in a thread
+        # so we never load the whole video into memory and never block the loop.
+        result = await asyncio.to_thread(
+            put_object_stream, storage_path, underlying, content_type, size
+        )
     except Exception as e:
         logger.error(f"Storage upload failed: {e}")
         raise HTTPException(status_code=500, detail="Lagring feilet")
@@ -153,8 +186,8 @@ async def upload_video(file: UploadFile = File(...), _: bool = Depends(require_a
         "id": video_id,
         "filename": file.filename,
         "storage_path": result["path"],
-        "content_type": file.content_type or "video/mp4",
-        "size": result.get("size", len(data)),
+        "content_type": content_type,
+        "size": result.get("size", size),
         "is_deleted": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -184,46 +217,124 @@ async def delete_video(video_id: str, _: bool = Depends(require_auth)):
     return {"ok": True}
 
 
+def _parse_range(range_header: Optional[str], total: int) -> Optional[tuple[int, int]]:
+    if not range_header or not range_header.startswith("bytes=") or total <= 0:
+        return None
+    try:
+        s, e = range_header[6:].split("-", 1)
+        start = int(s) if s else 0
+        end = int(e) if e else total - 1
+        end = min(end, total - 1)
+        start = max(0, start)
+        if start > end:
+            return None
+        return start, end
+    except Exception:
+        return None
+
+
 @api_router.get("/videos/{video_id}/stream")
 async def stream_video(video_id: str, request: Request):
     record = await db.videos.find_one({"id": video_id, "is_deleted": False}, {"_id": 0})
     if not record:
         raise HTTPException(status_code=404, detail="Video ikke funnet")
 
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    media_type = record.get("content_type") or "video/mp4"
+    storage_path = record["storage_path"]
+
     try:
-        data, content_type = get_object(record["storage_path"])
+        resp = await asyncio.to_thread(open_object_stream, storage_path, range_header)
     except Exception as e:
         logger.error(f"Storage fetch failed: {e}")
         raise HTTPException(status_code=500, detail="Klarte ikke å hente video")
 
-    media_type = record.get("content_type") or content_type or "video/mp4"
-    total = len(data)
-    range_header = request.headers.get("range") or request.headers.get("Range")
+    base_headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
 
-    if range_header and range_header.startswith("bytes="):
+    # Case 1: Storage natively honored Range -> pass-through 206
+    if resp.status_code == 206:
+        headers_out = dict(base_headers)
+        for h in ("Content-Range", "Content-Length"):
+            if h in resp.headers:
+                headers_out[h] = resp.headers[h]
+
+        def passthrough():
+            try:
+                for chunk in resp.iter_content(chunk_size=STREAM_CHUNK):
+                    if chunk:
+                        yield chunk
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+        return StreamingResponse(passthrough(), status_code=206, media_type=media_type, headers=headers_out)
+
+    # Storage returned full body (200). If client asked for a range, slice on-the-fly.
+    try:
+        total = int(resp.headers.get("Content-Length") or record.get("size") or 0)
+    except (TypeError, ValueError):
+        total = int(record.get("size") or 0)
+
+    parsed = _parse_range(range_header, total)
+    if parsed is not None:
+        start, end = parsed
+        length = end - start + 1
+        headers_out = dict(base_headers)
+        headers_out["Content-Range"] = f"bytes {start}-{end}/{total}"
+        headers_out["Content-Length"] = str(length)
+
+        def sliced():
+            pos = 0
+            remaining = length
+            try:
+                for chunk in resp.iter_content(chunk_size=STREAM_CHUNK):
+                    if not chunk:
+                        continue
+                    c_start = pos
+                    c_end = pos + len(chunk)
+                    pos = c_end
+                    if c_end <= start:
+                        continue
+                    if c_start > end:
+                        break
+                    local_start = max(0, start - c_start)
+                    local_end = min(len(chunk), end - c_start + 1)
+                    out = chunk[local_start:local_end]
+                    if not out:
+                        continue
+                    if len(out) > remaining:
+                        out = out[:remaining]
+                    remaining -= len(out)
+                    yield out
+                    if remaining <= 0:
+                        break
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+        return StreamingResponse(sliced(), status_code=206, media_type=media_type, headers=headers_out)
+
+    # No range requested -> stream full body
+    headers_out = dict(base_headers)
+    if "Content-Length" in resp.headers:
+        headers_out["Content-Length"] = resp.headers["Content-Length"]
+
+    def full_stream():
         try:
-            range_str = range_header.replace("bytes=", "").strip()
-            start_s, end_s = range_str.split("-", 1)
-            start = int(start_s) if start_s else 0
-            end = int(end_s) if end_s else total - 1
-            end = min(end, total - 1)
-            chunk = data[start:end + 1]
-            headers = {
-                "Content-Range": f"bytes {start}-{end}/{total}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(len(chunk)),
-                "Cache-Control": "no-cache",
-            }
-            return Response(content=chunk, status_code=206, media_type=media_type, headers=headers)
-        except Exception:
-            pass
+            for chunk in resp.iter_content(chunk_size=STREAM_CHUNK):
+                if chunk:
+                    yield chunk
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(total),
-        "Cache-Control": "no-cache",
-    }
-    return Response(content=data, media_type=media_type, headers=headers)
+    return StreamingResponse(full_stream(), status_code=200, media_type=media_type, headers=headers_out)
 
 
 # ---------- Playback state (single shared room) ----------
