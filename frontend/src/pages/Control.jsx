@@ -18,10 +18,14 @@ import {
   Send,
   Eye,
   Layers,
+  Monitor,
+  Smartphone,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, clearToken, streamUrl, thumbUrl } from "../lib/api";
 import { useSync } from "../lib/useSync";
+
+const VIEW_MODE_KEY = "kinokontroll_view_mode";
 
 function formatTime(s) {
   if (s == null || isNaN(s)) return "00:00";
@@ -291,6 +295,18 @@ export default function Control() {
   const navigate = useNavigate();
   const { state, connected, send } = useSync(roomId);
 
+  // View mode: "pc" | "mobile". Auto-detected on first mount, persisted thereafter.
+  const [viewMode, setViewMode] = useState(() => {
+    const saved = localStorage.getItem(VIEW_MODE_KEY);
+    if (saved === "pc" || saved === "mobile") return saved;
+    if (typeof window !== "undefined" && window.innerWidth < 768) return "mobile";
+    return "pc";
+  });
+  const setMode = (m) => {
+    setViewMode(m);
+    localStorage.setItem(VIEW_MODE_KEY, m);
+  };
+
   const loadMedia = async () => {
     try {
       const res = await api.get("/videos");
@@ -422,37 +438,287 @@ export default function Control() {
             {connected ? (
               <>
                 <Wifi className="w-3.5 h-3.5 text-emerald-500" />
-                <span className="text-emerald-500">Tilkoblet</span>
+                <span className="hidden sm:inline text-emerald-500">Tilkoblet</span>
               </>
             ) : (
               <>
                 <WifiOff className="w-3.5 h-3.5 text-red-500" />
-                <span className="text-red-500">Frakoblet</span>
+                <span className="hidden sm:inline text-red-500">Frakoblet</span>
               </>
             )}
           </div>
+
+          {/* View mode toggle */}
+          <div
+            className="inline-flex items-center rounded-md border border-white/10 bg-[#0A0A0A] p-0.5"
+            data-testid="control-view-mode-toggle"
+          >
+            <button
+              onClick={() => setMode("pc")}
+              data-testid="control-view-mode-pc"
+              title="Skrivebord"
+              aria-label="PC"
+              aria-pressed={viewMode === "pc"}
+              className={`w-8 h-7 flex items-center justify-center rounded transition-colors ${
+                viewMode === "pc"
+                  ? "bg-[#F59E0B] text-black"
+                  : "text-zinc-500 hover:text-white"
+              }`}
+            >
+              <Monitor className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setMode("mobile")}
+              data-testid="control-view-mode-mobile"
+              title="Mobil"
+              aria-label="Mobil"
+              aria-pressed={viewMode === "mobile"}
+              className={`w-8 h-7 flex items-center justify-center rounded transition-colors ${
+                viewMode === "mobile"
+                  ? "bg-[#F59E0B] text-black"
+                  : "text-zinc-500 hover:text-white"
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
           <a
             href={roomId === "default" ? "/display" : `/display/${roomId}`}
             target="_blank"
             rel="noreferrer"
             data-testid="control-open-display-link"
-            className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-300 hover:text-white px-3 py-1.5 border border-white/10 rounded-md hover:border-white/30 transition-colors"
+            className="hidden sm:inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-300 hover:text-white px-3 py-1.5 border border-white/10 rounded-md hover:border-white/30 transition-colors"
           >
             Åpne visning
           </a>
           <button
             onClick={logout}
             data-testid="control-logout-button"
-            className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-500 hover:text-white px-3 py-1.5 border border-white/10 rounded-md transition-colors"
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-500 hover:text-white px-2 sm:px-3 py-1.5 border border-white/10 rounded-md transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
-            Logg ut
+            <span className="hidden sm:inline">Logg ut</span>
           </button>
         </div>
       </header>
 
-      {/* Main grid */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 min-h-0">
+      {/* Mobile layout */}
+      {viewMode === "mobile" && (
+        <div
+          className="flex-1 flex flex-col gap-2 p-2 min-h-0"
+          data-testid="control-layout-mobile"
+        >
+          {/* Monitors side by side */}
+          <div className="grid grid-cols-2 gap-2 shrink-0" style={{ aspectRatio: "32 / 9" }}>
+            <PvwMonitor media={pvwMedia} />
+            <PgmMonitor media={pgmMedia} state={state} />
+          </div>
+
+          {/* Big CUT row */}
+          <div className="grid grid-cols-[auto,1fr,auto] items-center gap-2 shrink-0">
+            <button
+              onClick={() => send({ action: "prev" })}
+              data-testid="control-prev-button"
+              disabled={media.length === 0}
+              className="w-12 h-14 flex items-center justify-center rounded-md bg-[#111111] border border-white/10 active:bg-[#1a1a1a] text-zinc-300 disabled:opacity-40"
+              aria-label="Forrige"
+            >
+              <SkipBack className="w-5 h-5" />
+            </button>
+            <button
+              onClick={cut}
+              disabled={!state?.pvw_id}
+              data-testid="control-cut-button"
+              className="h-14 rounded-md bg-[#F59E0B] active:bg-[#D97706] text-black font-heading text-xl font-semibold tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              <Send className="w-5 h-5" />
+              CUT
+            </button>
+            <button
+              onClick={() => send({ action: "next" })}
+              data-testid="control-next-button"
+              disabled={media.length === 0}
+              className="w-12 h-14 flex items-center justify-center rounded-md bg-[#111111] border border-white/10 active:bg-[#1a1a1a] text-zinc-300 disabled:opacity-40"
+              aria-label="Neste"
+            >
+              <SkipForward className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Compact PGM transport */}
+          <div className="flex items-center gap-2 bg-[#0A0A0A] border border-white/10 rounded-lg p-2 shrink-0">
+            <button
+              onClick={togglePlay}
+              data-testid="control-play-pause-button"
+              className="w-14 h-12 flex items-center justify-center rounded-md bg-red-500 active:bg-red-600 text-white disabled:opacity-50"
+              disabled={!state?.pgm_id}
+              aria-label={isPlaying ? "Pause" : "Spill"}
+            >
+              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+            </button>
+            <button
+              onClick={() => send({ action: "loop", loop: !loop })}
+              data-testid="control-loop-toggle"
+              className={`w-12 h-12 flex items-center justify-center rounded-md border ${
+                loop
+                  ? "bg-[#F59E0B]/15 border-[#F59E0B]/50 text-[#F59E0B]"
+                  : "bg-[#111111] border-white/10 text-white"
+              }`}
+              aria-label="Gjenta"
+            >
+              <Repeat className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => send({ action: "mute", muted: !muted })}
+              data-testid="control-mute-button"
+              className="w-12 h-12 flex items-center justify-center rounded-md bg-[#111111] border border-white/10 text-white"
+              aria-label="Demp"
+            >
+              {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+            <div className="flex-1" />
+            <div className="text-[10px] uppercase tracking-[0.2em] font-mono">
+              <span
+                className={isPlaying ? "text-red-500" : "text-zinc-500"}
+                data-testid="control-status-text"
+              >
+                {isPlaying ? "ON AIR" : "PAUSE"}
+              </span>
+            </div>
+          </div>
+
+          {/* Timeline */}
+          <div className="flex items-center gap-2 px-1 shrink-0">
+            <div className="text-[11px] font-mono text-[#F59E0B] w-12" data-testid="control-current-time">
+              {formatTime(localTime)}
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={duration || 0}
+              step={0.1}
+              value={Math.min(localTime, duration || 0)}
+              onChange={(e) => setLocalTime(parseFloat(e.target.value))}
+              onMouseDown={() => setSeeking(true)}
+              onTouchStart={() => setSeeking(true)}
+              onMouseUp={onTimelineCommit}
+              onTouchEnd={onTimelineCommit}
+              disabled={!pgmMedia || !duration}
+              data-testid="control-timeline-slider"
+              className="flex-1 accent-[#F59E0B] h-1.5 bg-white/10 rounded-full appearance-none disabled:opacity-50"
+            />
+            <div className="text-[11px] font-mono text-zinc-500 w-12 text-right">
+              {formatTime(duration)}
+            </div>
+          </div>
+
+          {/* Volume slider (full width, touch-friendly) */}
+          <div className="flex items-center gap-2 px-1 shrink-0">
+            <Volume2 className="w-3.5 h-3.5 text-zinc-500" />
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={muted ? 0 : volume}
+              onChange={onVolumeChange}
+              data-testid="control-volume-slider"
+              className="flex-1 accent-[#F59E0B] h-1.5 bg-white/10 rounded-full appearance-none"
+            />
+            <div className="font-mono text-[11px] text-zinc-500 w-8 text-right">
+              {Math.round((muted ? 0 : volume) * 100)}
+            </div>
+          </div>
+
+          {/* Playlist (scrollable) */}
+          <div
+            className="flex-1 min-h-0 bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden flex flex-col"
+            data-testid="control-playlist"
+          >
+            <div className="px-3 py-2 border-b border-white/5 flex items-center justify-between bg-[#0E0E0E] shrink-0">
+              <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold flex items-center gap-2">
+                <Layers className="w-3 h-3" />
+                Bibliotek
+              </div>
+              <div className="text-[11px] font-mono text-zinc-600">{media.length}</div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {media.length === 0 ? (
+                <div className="px-4 py-6 text-sm text-zinc-600 text-center">
+                  Tomt.{" "}
+                  <Link to="/upload" className="text-[#F59E0B] hover:underline">
+                    Last opp →
+                  </Link>
+                </div>
+              ) : (
+                <ul>
+                  {media.map((m, i) => {
+                    const isPgm = m.id === state?.pgm_id;
+                    const isPvw = m.id === state?.pvw_id;
+                    const isImg = m.media_type === "image";
+                    return (
+                      <li key={m.id}>
+                        <button
+                          onClick={() => send({ action: "set_pvw", media_id: m.id })}
+                          data-testid="control-playlist-item"
+                          className={`w-full text-left px-3 py-3 flex items-center gap-3 border-l-2 transition-colors ${
+                            isPgm
+                              ? "border-l-red-500 bg-red-500/5"
+                              : isPvw
+                              ? "border-l-emerald-500 bg-emerald-500/5"
+                              : "border-l-transparent active:bg-[#0E0E0E]"
+                          }`}
+                        >
+                          <div className="font-mono text-xs text-zinc-600 w-5 shrink-0">
+                            {String(i + 1).padStart(2, "0")}
+                          </div>
+                          <div className="w-14 h-9 rounded bg-black/60 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
+                            {m.has_thumbnail ? (
+                              <img
+                                src={thumbUrl(m.id)}
+                                alt=""
+                                className="w-full h-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : isImg ? (
+                              <ImageIcon className="w-4 h-4 text-[#F59E0B]" />
+                            ) : (
+                              <Film className="w-4 h-4 text-zinc-600" />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-zinc-200 truncate">{m.filename}</div>
+                            <div className="text-[10px] text-zinc-600 font-mono uppercase tracking-wider">
+                              {isImg ? `bilde · ${m.duration || 5}s` : "video"}
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-0.5 shrink-0">
+                            {isPgm && (
+                              <span className="text-[9px] uppercase tracking-[0.2em] text-red-500 font-mono font-semibold">
+                                PGM
+                              </span>
+                            )}
+                            {isPvw && (
+                              <span className="text-[9px] uppercase tracking-[0.2em] text-emerald-500 font-mono font-semibold">
+                                PVW
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PC layout */}
+      {viewMode === "pc" && (
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 p-3 min-h-0" data-testid="control-layout-pc">
         {/* Playlist */}
         <aside
           className="lg:col-span-3 flex flex-col bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden min-h-0"
@@ -535,8 +801,8 @@ export default function Control() {
 
         {/* Center: PVW + PGM monitors + transport */}
         <section className="lg:col-span-9 flex flex-col gap-3 min-h-0">
-          {/* Monitors */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 flex-1 min-h-0">
+          {/* Monitors — alltid side om side */}
+          <div className="grid grid-cols-2 gap-3 flex-1 min-h-0">
             <PvwMonitor media={pvwMedia} />
             <PgmMonitor media={pgmMedia} state={state} />
           </div>
@@ -682,6 +948,7 @@ export default function Control() {
           </div>
         </section>
       </div>
+      )}
 
       {/* Hidden probe to read duration */}
       <video ref={probeRef} className="hidden" preload="metadata" muted />
