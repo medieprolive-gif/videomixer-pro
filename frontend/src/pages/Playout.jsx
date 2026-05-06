@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -21,7 +21,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api, clearToken, thumbUrl } from "../lib/api";
+import { api, clearToken, streamUrl, thumbUrl } from "../lib/api";
 import { useSync } from "../lib/useSync";
 
 function pad(n) {
@@ -227,10 +227,19 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
                 value={draft.media_id}
                 onChange={(e) => {
                   const m = media.find((x) => x.id === e.target.value);
+                  // When picking a video with a known duration, default the
+                  // timeline-block length to the actual clip length (rounded
+                  // up to nearest minute, with a 5-min minimum so very short
+                  // clips still produce a clickable block).
+                  let nextDuration = draft.duration_minutes;
+                  if (m && m.media_type === "video" && m.duration > 0) {
+                    nextDuration = Math.max(5, Math.ceil(m.duration / 60));
+                  }
                   setDraft({
                     ...draft,
                     media_id: e.target.value,
                     title: draft.title || m?.filename || "",
+                    duration_minutes: nextDuration,
                   });
                 }}
                 data-testid="playout-modal-media"
@@ -303,6 +312,17 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
             <div className="md:col-span-2">
               <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1">
                 Lengde i tidslinje (minutter)
+                {(() => {
+                  const m = media.find((x) => x.id === draft.media_id);
+                  if (!m || !m.duration) return null;
+                  const mins = Math.floor(m.duration / 60);
+                  const secs = Math.round(m.duration % 60);
+                  return (
+                    <span className="ml-2 text-zinc-400 normal-case tracking-normal">
+                      · faktisk klipp-lengde {mins}m {secs}s
+                    </span>
+                  );
+                })()}
               </label>
               <div className="flex items-center gap-2">
                 <input
@@ -409,6 +429,7 @@ function TimelineGrid({
   onItemMove,
   currentMediaId,
 }) {
+  const containerRef = useRef(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
   const [draggingId, setDraggingId] = useState(null);
 
@@ -428,6 +449,13 @@ function TimelineGrid({
     return out;
   }, []);
 
+  const slotIndexFromY = (clientY) => {
+    if (!containerRef.current) return -1;
+    const rect = containerRef.current.getBoundingClientRect();
+    const y = clientY - rect.top;
+    return Math.floor(y / SLOT_PX);
+  };
+
   const handleDragStart = (e, item) => {
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", item.id);
@@ -437,19 +465,26 @@ function TimelineGrid({
     setDraggingId(null);
     setDragOverIdx(null);
   };
-  const handleDragOver = (e, idx) => {
+
+  // Container-level drag handlers — robust against z-index / overlapping items
+  const handleContainerDragOver = (e) => {
+    if (!draggingId) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-    if (dragOverIdx !== idx) setDragOverIdx(idx);
+    const idx = slotIndexFromY(e.clientY);
+    if (idx >= 0 && idx < TOTAL_SLOTS && dragOverIdx !== idx) {
+      setDragOverIdx(idx);
+    }
   };
-  const handleDrop = (e, idx) => {
+  const handleContainerDrop = (e) => {
     e.preventDefault();
-    const id = e.dataTransfer.getData("text/plain");
+    const id = e.dataTransfer.getData("text/plain") || draggingId;
     setDragOverIdx(null);
     setDraggingId(null);
     if (!id) return;
+    const idx = slotIndexFromY(e.clientY);
+    if (idx < 0 || idx >= TOTAL_SLOTS) return;
     const slot = slotKeys[idx];
-    if (!slot) return;
     onItemMove?.(id, `${date}T${slot.key}`);
   };
 
@@ -467,8 +502,18 @@ function TimelineGrid({
         </div>
       </div>
 
-      <div className="relative" style={{ height: TIMELINE_HEIGHT }}>
-        {/* Background slot rows (lines + drop targets + click-to-add) */}
+      <div
+        ref={containerRef}
+        className="relative"
+        style={{ height: TIMELINE_HEIGHT }}
+        onDragOver={handleContainerDragOver}
+        onDrop={handleContainerDrop}
+        onDragLeave={(e) => {
+          // Only clear when leaving the container itself, not children
+          if (e.currentTarget === e.target) setDragOverIdx(null);
+        }}
+      >
+        {/* Background slot rows (lines + click-to-add) */}
         {slotKeys.map((slot) => {
           const top = slot.idx * SLOT_PX;
           const isDragOver = dragOverIdx === slot.idx;
@@ -488,19 +533,16 @@ function TimelineGrid({
               >
                 {slot.key}
               </div>
-              {/* Drop / click target */}
+              {/* Click target (drag is handled at container level) */}
               <div
                 role="button"
                 tabIndex={-1}
                 data-testid="playout-empty-slot"
                 data-time={slot.key}
                 onClick={() => onSlotClick(`${date}T${slot.key}`)}
-                onDragOver={(e) => handleDragOver(e, slot.idx)}
-                onDragLeave={() => setDragOverIdx((v) => (v === slot.idx ? null : v))}
-                onDrop={(e) => handleDrop(e, slot.idx)}
                 className={`absolute top-0 bottom-0 cursor-pointer transition-colors ${
                   isDragOver
-                    ? "bg-[#F59E0B]/15 border border-[#F59E0B]/60"
+                    ? "bg-[#F59E0B]/20 outline outline-2 outline-[#F59E0B]/70"
                     : "hover:bg-[#F59E0B]/5"
                 }`}
                 style={{ left: TIME_COL_WIDTH, right: 0 }}
@@ -541,7 +583,8 @@ function TimelineGrid({
                 height: Math.max(SLOT_PX - 4, heightPx),
                 left: TIME_COL_WIDTH + 6,
                 right: 8,
-                opacity: isDragging ? 0.4 : 1,
+                opacity: isDragging ? 0.35 : 1,
+                pointerEvents: isDragging ? "none" : "auto",
               }}
               className={`absolute z-10 cursor-move rounded border px-3 py-2 flex flex-col gap-1 transition-colors overflow-hidden shadow-lg ${
                 isOnAir
@@ -631,6 +674,7 @@ export default function Playout() {
   const [editing, setEditing] = useState(null); // null | { mode: "create"|"edit", item?, initialTime? }
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [uploadingBg, setUploadingBg] = useState(false);
+  const [uploadingBumper, setUploadingBumper] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -681,11 +725,12 @@ export default function Playout() {
     }
   };
 
-  /** Upload an image and persist its id under the given settings field. */
+  /** Upload an image OR video and persist its id under the given settings field. */
   const uploadImageToSetting = async (file, settingKey, busySetter) => {
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast.error("Bare bildefiler kan brukes her");
+    const isMedia = file.type.startsWith("image/") || file.type.startsWith("video/");
+    if (!isMedia) {
+      toast.error("Bare bilde- eller videofiler kan brukes her");
       return;
     }
     busySetter(true);
@@ -845,48 +890,120 @@ export default function Playout() {
         {/* Settings */}
         <section className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4">
           <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-3 flex items-center gap-2">
-            <Settings className="w-3 h-3" /> Innstillinger
+            <Settings className="w-3 h-3" /> Pre-roll bumper (spilles 5s før hvert program)
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-            <div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <div className="md:col-span-2">
               <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1">
-                Global bumper
+                Bumper (animasjon eller stillbilde)
               </label>
-              <select
-                value={settings.global_bumper_id || ""}
-                onChange={(e) => setSettings({ ...settings, global_bumper_id: e.target.value || null })}
-                data-testid="playout-bumper-select"
-                className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-[#F59E0B]"
-              >
-                <option value="">— Ingen —</option>
-                {images.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.filename}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-3">
+                <div className="w-20 h-12 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                  {settings.global_bumper_id ? (
+                    media.find((m) => m.id === settings.global_bumper_id)?.media_type === "video" ? (
+                      <video
+                        src={streamUrl(settings.global_bumper_id)}
+                        muted
+                        loop
+                        autoPlay
+                        playsInline
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <img
+                        src={thumbUrl(settings.global_bumper_id)}
+                        alt=""
+                        className="w-full h-full object-cover"
+                      />
+                    )
+                  ) : (
+                    <ImageIcon className="w-4 h-4 text-zinc-600" />
+                  )}
+                </div>
+                <label
+                  className={`inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] px-3 py-2 border border-white/10 rounded-md cursor-pointer transition-colors ${
+                    uploadingBumper
+                      ? "text-zinc-600 border-white/5 cursor-wait"
+                      : "text-zinc-300 hover:text-[#F59E0B] hover:border-[#F59E0B]/40"
+                  }`}
+                  data-testid="playout-bumper-upload"
+                >
+                  {uploadingBumper ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <UploadIcon className="w-3.5 h-3.5" />
+                  )}
+                  Last opp bumper
+                  <input
+                    type="file"
+                    accept="image/*,video/*"
+                    className="hidden"
+                    disabled={uploadingBumper}
+                    onChange={(e) =>
+                      uploadImageToSetting(
+                        e.target.files?.[0],
+                        "global_bumper_id",
+                        setUploadingBumper
+                      )
+                    }
+                  />
+                </label>
+                {settings.global_bumper_id && (
+                  <button
+                    onClick={() =>
+                      setSettings({ ...settings, global_bumper_id: null })
+                    }
+                    title="Fjern bumper"
+                    data-testid="playout-bumper-clear"
+                    className="text-zinc-500 hover:text-red-400 p-1.5 rounded hover:bg-red-500/10"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <select
+                  value={settings.global_bumper_id || ""}
+                  onChange={(e) =>
+                    setSettings({ ...settings, global_bumper_id: e.target.value || null })
+                  }
+                  data-testid="playout-bumper-select"
+                  className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-[#F59E0B]"
+                  title="Eller velg fra eksisterende mediabibliotek"
+                >
+                  <option value="">— Velg fra bibliotek —</option>
+                  {media.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.media_type === "video" ? "🎬 " : "🖼 "}
+                      {m.filename}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div>
               <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1">
-                Bumper varighet (sek)
+                Pre-roll varighet (sek før program)
               </label>
-              <input
-                type="number"
-                min={1}
-                max={3600}
-                value={settings.global_bumper_duration || 5}
-                onChange={(e) => setSettings({ ...settings, global_bumper_duration: e.target.value })}
-                data-testid="playout-bumper-duration"
-                className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={settings.global_bumper_duration || 5}
+                  onChange={(e) =>
+                    setSettings({ ...settings, global_bumper_duration: e.target.value })
+                  }
+                  data-testid="playout-bumper-duration"
+                  className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
+                />
+                <button
+                  onClick={saveSettings}
+                  data-testid="playout-bumper-save"
+                  className="inline-flex items-center justify-center gap-2 bg-[#111111] border border-white/10 hover:border-[#F59E0B]/40 hover:bg-[#F59E0B]/5 text-zinc-300 hover:text-[#F59E0B] px-4 py-2 rounded-md text-sm transition-colors"
+                >
+                  <Save className="w-3.5 h-3.5" /> Lagre
+                </button>
+              </div>
             </div>
-            <button
-              onClick={saveSettings}
-              data-testid="playout-bumper-save"
-              className="inline-flex items-center justify-center gap-2 bg-[#111111] border border-white/10 hover:border-[#F59E0B]/40 hover:bg-[#F59E0B]/5 text-zinc-300 hover:text-[#F59E0B] px-4 py-2 rounded-md text-sm transition-colors"
-            >
-              <Save className="w-3.5 h-3.5" /> Lagre
-            </button>
           </div>
         </section>
 
@@ -949,7 +1066,7 @@ export default function Playout() {
                   Last opp logo
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/*,video/*"
                     className="hidden"
                     disabled={uploadingLogo}
                     onChange={(e) =>
@@ -1009,7 +1126,7 @@ export default function Playout() {
                   Last opp bakgrunn
                   <input
                     type="file"
-                    accept="image/*"
+                    accept="image/*,video/*"
                     className="hidden"
                     disabled={uploadingBg}
                     onChange={(e) =>

@@ -50,6 +50,9 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
   const textColor = settings?.program_overview_text_color || "#FFFFFF";
   const logoId = settings?.program_overview_logo_id;
   const bgId = settings?.program_overview_background_id;
+  const logoMedia = (media || []).find((m) => m.id === logoId);
+  const bgMedia = (media || []).find((m) => m.id === bgId);
+  const bgIsVideo = bgMedia?.media_type === "video";
 
   const upcoming = useMemo(() => {
     const ts = now.getTime();
@@ -88,12 +91,24 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
         fontFamily: "Helvetica, Arial, sans-serif",
         color: textColor,
         backgroundColor: "#000",
-        backgroundImage: bgId ? `url(${streamUrl(bgId)})` : undefined,
+        backgroundImage: bgId && !bgIsVideo ? `url(${streamUrl(bgId)})` : undefined,
         backgroundSize: "cover",
         backgroundPosition: "center",
         containerType: "size",
       }}
     >
+      {/* Looping video background (animated) */}
+      {bgIsVideo && bgId && (
+        <video
+          key={bgId}
+          src={streamUrl(bgId)}
+          autoPlay
+          loop
+          muted
+          playsInline
+          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+        />
+      )}
       {/* Dark veil for legibility over arbitrary background images */}
       <div
         className="absolute inset-0 pointer-events-none"
@@ -114,7 +129,18 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
             style={{ width: "26cqw", minHeight: "10cqh" }}
             data-testid="program-overview-logo"
           >
-            {logoId ? (
+            {logoId && logoMedia?.media_type === "video" ? (
+              <video
+                key={logoId}
+                src={streamUrl(logoId)}
+                autoPlay
+                loop
+                muted
+                playsInline
+                className="object-contain drop-shadow-2xl"
+                style={{ maxHeight: "14cqh", maxWidth: "100%" }}
+              />
+            ) : logoId ? (
               <img
                 src={thumbUrl(logoId)}
                 alt="Logo"

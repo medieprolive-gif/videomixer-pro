@@ -135,10 +135,14 @@ async def scheduler_tick():
         if s <= now:
             await _play_main_item(item)
 
-    # Scheduled items due (with pre-plakat consideration)
+    # Scheduled items due (with pre-plakat consideration). When an item has no
+    # explicit pre_plakat configured we fall back to the room-level global
+    # bumper, which gives users a single global pre-roll that auto-plays before
+    # every scheduled program.
     items = await db.schedule.find(
         {"status": "scheduled"}, {"_id": 0}
     ).sort("scheduled_at", 1).to_list(500)
+    settings_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     for item in items:
         s = item["scheduled_at"]
         if isinstance(s, str):
@@ -147,10 +151,22 @@ async def scheduler_tick():
             s = s.replace(tzinfo=timezone.utc)
         pre_id = item.get("pre_plakat_id")
         pre_dur = float(item.get("pre_plakat_duration") or 0)
+        if not pre_id or pre_dur <= 0:
+            room = item.get("room") or DEFAULT_ROOM
+            if room not in settings_cache:
+                settings_cache[room] = await db.room_settings.find_one(
+                    {"room": room}, {"_id": 0}
+                )
+            rs = settings_cache[room]
+            if rs and rs.get("global_bumper_id"):
+                pre_id = rs["global_bumper_id"]
+                pre_dur = float(rs.get("global_bumper_duration") or 5.0)
         if pre_id and pre_dur > 0:
             pre_start = s - timedelta(seconds=pre_dur)
             if pre_start <= now < s:
-                await _play_pre_plakat(item)
+                await _play_pre_plakat(
+                    {**item, "pre_plakat_id": pre_id, "pre_plakat_duration": pre_dur}
+                )
                 continue
         if s <= now:
             await _play_main_item(item)
@@ -291,6 +307,31 @@ def _detect_media_type(content_type: Optional[str], filename: Optional[str]) -> 
     return None
 
 
+def _probe_duration_seconds(path: str) -> float:
+    """Return container duration via ffprobe, 0.0 on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return float((result.stdout or "0").strip() or 0)
+    except Exception:
+        logger.exception("ffprobe failed for %s", path)
+    return 0.0
+
+
 @api_router.post("/videos/upload", response_model=VideoOut)
 async def upload_video(
     file: UploadFile = File(...),
@@ -321,21 +362,54 @@ async def upload_video(
             detail=f"Filen er for stor (maks {MAX_UPLOAD_MB} MB)",
         )
 
-    try:
-        result = await asyncio.to_thread(
-            put_object_stream, storage_path, underlying, content_type, size
+    # For videos, write to a tempfile so we can ffprobe it for the actual
+    # duration BEFORE uploading. Then re-stream from disk to object storage.
+    probed_video_duration = 0.0
+    tmp_path: Optional[str] = None
+    if media_type == "video":
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+            tmp_path = tmp.name
+            while True:
+                chunk = underlying.read(64 * 1024)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+        probed_video_duration = await asyncio.to_thread(
+            _probe_duration_seconds, tmp_path
         )
+
+    try:
+        if tmp_path:
+            with open(tmp_path, "rb") as fh:
+                result = await asyncio.to_thread(
+                    put_object_stream, storage_path, fh, content_type, size
+                )
+        else:
+            result = await asyncio.to_thread(
+                put_object_stream, storage_path, underlying, content_type, size
+            )
     except Exception as e:
         logger.error(f"Storage upload failed: {e}")
         raise HTTPException(status_code=500, detail="Lagring feilet")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
-    # Sanitize duration (images only)
-    safe_duration = 5.0
-    if media_type == "image" and duration is not None:
-        try:
-            safe_duration = max(1.0, min(3600.0, float(duration)))
-        except (TypeError, ValueError):
-            safe_duration = 5.0
+    # Resolve duration:
+    #  - video: ffprobe-derived (fallback 0 → frontend will show "ukjent")
+    #  - image: client-supplied display duration (default 5s)
+    if media_type == "video":
+        safe_duration = float(probed_video_duration or 0.0)
+    else:
+        safe_duration = 5.0
+        if duration is not None:
+            try:
+                safe_duration = max(1.0, min(3600.0, float(duration)))
+            except (TypeError, ValueError):
+                safe_duration = 5.0
 
     doc = {
         "id": media_id,
