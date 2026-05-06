@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, UploadCloud, Trash2, Film, Image as ImageIcon, LogOut, Clock, Scissors, X } from "lucide-react";
+import {
+  ArrowLeft,
+  UploadCloud,
+  Trash2,
+  Film,
+  Image as ImageIcon,
+  LogOut,
+  Clock,
+  Scissors,
+  X,
+  LogIn,
+  LogOut as LogOutIcon,
+  Undo2,
+  Eraser,
+} from "lucide-react";
 import { toast } from "sonner";
 import { api, authHeaders, API, clearToken, thumbUrl, streamUrl } from "../lib/api";
 
@@ -24,6 +38,57 @@ function TrimModal({ video, onClose, onSaved }) {
   const [time, setTime] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Undo stack (each entry is a {start, end} snapshot taken BEFORE the change)
+  const [history, setHistory] = useState([]);
+
+  /** Push the current state to history before mutating start/end. */
+  const pushHistory = () => {
+    setHistory((h) => {
+      const snap = { start, end };
+      // Dedupe identical consecutive entries
+      if (h.length && h[h.length - 1].start === snap.start && h[h.length - 1].end === snap.end) {
+        return h;
+      }
+      return [...h.slice(-49), snap];
+    });
+  };
+
+  /** Mark current playback time as "in" (start). */
+  const setInPoint = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    const t = Math.min(v.currentTime || 0, Math.max(0, end - 0.1));
+    pushHistory();
+    setStart(Math.max(0, t));
+  };
+
+  /** Mark current playback time as "out" (end). */
+  const setOutPoint = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    const t = Math.max(v.currentTime || 0, start + 0.1);
+    pushHistory();
+    setEnd(Math.min(duration, t));
+  };
+
+  /** Reset trim points to the full clip. */
+  const resetPoints = () => {
+    pushHistory();
+    setStart(0);
+    setEnd(duration);
+  };
+
+  /** Step back one history snapshot. */
+  const undo = () => {
+    setHistory((h) => {
+      if (h.length === 0) return h;
+      const last = h[h.length - 1];
+      setStart(last.start);
+      setEnd(last.end);
+      return h.slice(0, -1);
+    });
+  };
 
   useEffect(() => {
     const v = videoRef.current;
@@ -68,14 +133,31 @@ function TrimModal({ video, onClose, onSaved }) {
     setPreviewing(true);
   };
 
-  // ESC closes
+  // ESC closes; I/O set in/out; Ctrl/Cmd+Z = undo
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") {
+        if (e.key !== "Escape") return;
+      }
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "i" || e.key === "I") {
+        e.preventDefault();
+        setInPoint();
+      } else if (e.key === "o" || e.key === "O") {
+        e.preventDefault();
+        setOutPoint();
+      } else if ((e.key === "z" || e.key === "Z") && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        undo();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onClose, start, end, duration]);
 
   const trimmedLength = Math.max(0, end - start);
 
@@ -141,6 +223,57 @@ function TrimModal({ video, onClose, onSaved }) {
             data-testid="trim-video"
           />
 
+          {/* In/Out + Undo + Reset toolbar */}
+          <div className="flex flex-wrap items-center gap-2" data-testid="trim-toolbar">
+            <button
+              onClick={setInPoint}
+              data-testid="trim-set-in-button"
+              title="Sett startpunkt til nåværende tid (I)"
+              className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-emerald-400 hover:text-emerald-300 px-3 py-2 border border-emerald-500/40 hover:border-emerald-500 bg-emerald-500/5 hover:bg-emerald-500/10 rounded-md transition-colors"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              Sett inn
+              <span className="text-[9px] font-mono opacity-60">I</span>
+            </button>
+            <button
+              onClick={setOutPoint}
+              data-testid="trim-set-out-button"
+              title="Sett sluttpunkt til nåværende tid (O)"
+              className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-red-400 hover:text-red-300 px-3 py-2 border border-red-500/40 hover:border-red-500 bg-red-500/5 hover:bg-red-500/10 rounded-md transition-colors"
+            >
+              <LogOutIcon className="w-3.5 h-3.5" />
+              Sett ut
+              <span className="text-[9px] font-mono opacity-60">O</span>
+            </button>
+
+            <div className="flex-1" />
+
+            <button
+              onClick={undo}
+              disabled={history.length === 0}
+              data-testid="trim-undo-button"
+              title="Angre forrige endring (⌘Z / Ctrl-Z)"
+              className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-400 hover:text-white px-3 py-2 border border-white/10 hover:border-white/30 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              Angre
+              {history.length > 0 && (
+                <span className="text-[9px] font-mono text-[#F59E0B]" data-testid="trim-undo-count">
+                  {history.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={resetPoints}
+              data-testid="trim-reset-button"
+              title="Tilbakestill — bruk hele klippet"
+              className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-400 hover:text-red-400 px-3 py-2 border border-white/10 hover:border-red-500/50 rounded-md transition-colors"
+            >
+              <Eraser className="w-3.5 h-3.5" />
+              Fjern
+            </button>
+          </div>
+
           {/* Timeline visualization */}
           <div className="space-y-2">
             <div className="relative h-9 rounded bg-black/60 border border-white/10 overflow-hidden">
@@ -190,6 +323,8 @@ function TrimModal({ video, onClose, onSaved }) {
                   max={duration || 0}
                   step={0.05}
                   value={start}
+                  onMouseDown={pushHistory}
+                  onTouchStart={pushHistory}
                   onChange={(e) => {
                     const s = Math.min(parseFloat(e.target.value), end - 0.1);
                     setStart(Math.max(0, s));
@@ -216,6 +351,8 @@ function TrimModal({ video, onClose, onSaved }) {
                   max={duration || 0}
                   step={0.05}
                   value={end}
+                  onMouseDown={pushHistory}
+                  onTouchStart={pushHistory}
                   onChange={(e) => {
                     const en = Math.max(parseFloat(e.target.value), start + 0.1);
                     setEnd(Math.min(duration || 0, en));
