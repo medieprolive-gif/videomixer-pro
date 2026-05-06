@@ -86,7 +86,7 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
   return (
     <div
       data-testid="display-program-overview"
-      className="absolute inset-0 z-10 overflow-hidden"
+      className="relative w-full h-full overflow-hidden"
       style={{
         fontFamily: "Helvetica, Arial, sans-serif",
         color: textColor,

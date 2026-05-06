@@ -57,12 +57,16 @@ export default function Display() {
   const [now, setNow] = useState(Date.now());
   const videoRef = useRef(null);
   const containerRef = useRef(null);
+  const canvasRef = useRef(null);
   const [currentSrcId, setCurrentSrcId] = useState(null);
   const [showCursor, setShowCursor] = useState(false);
   const [fs, setFs] = useState(false);
   const [showKioskOverlay, setShowKioskOverlay] = useState(true);
+  const [frozenFrame, setFrozenFrame] = useState(null);
+  const [frozenOpacity, setFrozenOpacity] = useState(0);
   const cursorTimer = useRef(null);
   const imageTimer = useRef(null);
+  const frozenTimer = useRef(null);
 
   // Load media library (so we know media_type / duration of pgm_id)
   const loadMedia = useCallback(async () => {
@@ -179,22 +183,60 @@ export default function Display() {
     };
   }, []);
 
-  // Swap video src when PGM video changes
+  // Swap video src when PGM video changes. Before the swap we capture the
+  // outgoing video's current frame onto a canvas and render it as a fade-out
+  // overlay, giving a broadcast-style crossfade instead of a black drop while
+  // the new source loads.
   useEffect(() => {
     if (!isVideo) return;
     const v = videoRef.current;
     if (!v) return;
-    if (state?.pgm_id !== currentSrcId) {
-      setCurrentSrcId(state?.pgm_id);
-      if (state?.pgm_id) {
-        v.src = streamUrl(state.pgm_id);
-        v.load();
-      } else {
-        v.removeAttribute("src");
-        v.load();
+    if (state?.pgm_id === currentSrcId) return;
+
+    // Capture last frame of the OUTGOING video so we can crossfade over the
+    // black gap while the new source is buffering.
+    if (currentSrcId && v.videoWidth > 0 && v.readyState >= 2) {
+      try {
+        const c = canvasRef.current || document.createElement("canvas");
+        c.width = v.videoWidth;
+        c.height = v.videoHeight;
+        c.getContext("2d").drawImage(v, 0, 0);
+        const dataUrl = c.toDataURL("image/jpeg", 0.6);
+        setFrozenFrame(dataUrl);
+        setFrozenOpacity(1);
+      } catch (_) {
+        /* CORS / taint — skip crossfade */
       }
     }
+
+    setCurrentSrcId(state?.pgm_id);
+    if (state?.pgm_id) {
+      v.src = streamUrl(state.pgm_id);
+      v.load();
+    } else {
+      v.removeAttribute("src");
+      v.load();
+    }
   }, [state?.pgm_id, currentSrcId, isVideo]);
+
+  // Fade out the frozen frame once the new video is ready to render pixels.
+  useEffect(() => {
+    if (!frozenFrame) return;
+    const v = videoRef.current;
+    if (!v) return;
+    const onReady = () => {
+      setFrozenOpacity(0);
+      if (frozenTimer.current) clearTimeout(frozenTimer.current);
+      frozenTimer.current = setTimeout(() => setFrozenFrame(null), 700);
+    };
+    v.addEventListener("canplay", onReady);
+    // Safety net: always clear after 1.5s even if canplay never fires
+    const safety = setTimeout(onReady, 1500);
+    return () => {
+      v.removeEventListener("canplay", onReady);
+      clearTimeout(safety);
+    };
+  }, [frozenFrame]);
 
   // Apply playback state to <video>
   useEffect(() => {
@@ -398,41 +440,60 @@ export default function Display() {
         <video
           ref={videoRef}
           data-testid="display-video"
-          className={`w-full h-full object-contain bg-black ${
-            isVideo && !showProgramOverview ? "" : "hidden"
+          className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${
+            isVideo && !showProgramOverview ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
           playsInline
           autoPlay
         />
 
-        {isImage && pgm && !showProgramOverview && (
+        {/* Crossfade snapshot — shows last frame of outgoing video until the
+            new source is ready to paint pixels, then fades to 0 over 500ms. */}
+        {frozenFrame && (
           <img
-            data-testid="display-image"
-            src={thumbUrl(pgm.id)}
-            alt={pgm.filename || ""}
-            className="w-full h-full object-contain bg-black"
+            src={frozenFrame}
+            alt=""
+            data-testid="display-crossfade"
+            aria-hidden="true"
+            style={{
+              opacity: frozenOpacity,
+              transition: "opacity 500ms ease-out",
+            }}
+            className="absolute inset-0 w-full h-full object-contain bg-black z-[5] pointer-events-none"
           />
         )}
+        <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
 
-        {idle && !showKioskOverlay && !showProgramOverview && (
-          <div
-            className="absolute inset-0 flex flex-col items-center justify-center text-center"
-            data-testid="display-idle"
-          >
-            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border border-white/10 mb-6 animate-pulse">
-              <Film className="w-8 h-8 text-[#F59E0B]" strokeWidth={1.5} />
-            </div>
-            <div className="text-3xl font-semibold tracking-tight text-white mb-2">
-              KinoKontroll
-            </div>
-            <div className="text-xs uppercase tracking-[0.3em] text-zinc-600">
-              Venter på avspilling
-            </div>
-            <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
-              Sal · {roomId}
-            </div>
+        <img
+          data-testid="display-image"
+          src={isImage && pgm ? thumbUrl(pgm.id) : ""}
+          alt={pgm?.filename || ""}
+          className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${
+            isImage && pgm && !showProgramOverview ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+        />
+
+        <div
+          className={`absolute inset-0 flex flex-col items-center justify-center text-center transition-opacity duration-500 ${
+            idle && !showKioskOverlay && !showProgramOverview
+              ? "opacity-100"
+              : "opacity-0 pointer-events-none"
+          }`}
+          data-testid="display-idle"
+        >
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border border-white/10 mb-6 animate-pulse">
+            <Film className="w-8 h-8 text-[#F59E0B]" strokeWidth={1.5} />
           </div>
-        )}
+          <div className="text-3xl font-semibold tracking-tight text-white mb-2">
+            KinoKontroll
+          </div>
+          <div className="text-xs uppercase tracking-[0.3em] text-zinc-600">
+            Venter på avspilling
+          </div>
+          <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
+            Sal · {roomId}
+          </div>
+        </div>
 
         {/* "Neste opp"-overlay (siste 10 sek av PGM) */}
         {showNextUp && (
@@ -453,15 +514,22 @@ export default function Display() {
           </div>
         )}
 
-        {/* Program overview (full 16:9, between items / idle) */}
-        {showProgramOverview && (
-          <ProgramOverview
-            settings={settings}
-            schedule={schedule}
-            media={media}
-            roomId={roomId}
-          />
-        )}
+        {/* Program overview — always mounted, crossfades via opacity so the
+            transition between PGM video and overview is smooth (no black drop). */}
+        <div
+          className={`absolute inset-0 z-10 transition-opacity duration-500 ${
+            showProgramOverview ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+        >
+          {settings?.program_overview_enabled && (
+            <ProgramOverview
+              settings={settings}
+              schedule={schedule}
+              media={media}
+              roomId={roomId}
+            />
+          )}
+        </div>
 
         {/* Neste innslag (fra spillelisten) – vises kontinuerlig nederst */}
         {showScheduleTicker && !showProgramOverview && (
