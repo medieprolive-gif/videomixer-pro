@@ -296,6 +296,26 @@ export default function Display() {
 
   const idle = !state?.pgm_id;
 
+  // Is any scheduled item currently within its play window (incl. pre-roll)?
+  // Used by the program-overview overlay so it takes precedence between
+  // programs even if the room state still holds a stale pgm_id from earlier
+  // playback. When the scheduler is actively running an item we let the video
+  // play normally.
+  const isInScheduledWindow = useMemo(() => {
+    const ts = now;
+    const globalPre = settings?.global_bumper_id
+      ? (settings.global_bumper_duration || 0) * 1000
+      : 0;
+    return (schedule || []).some((s) => {
+      if (s.status === "played" || s.status === "cancelled") return false;
+      const start = new Date(s.scheduled_at).getTime();
+      const dur = (s.duration_minutes || 15) * 60 * 1000;
+      const itemPre = (s.pre_plakat_duration || 0) * 1000;
+      const effectivePre = itemPre > 0 ? itemPre : globalPre;
+      return ts >= start - effectivePre && ts < start + dur;
+    });
+  }, [schedule, now, settings]);
+
   // Next scheduled item (upcoming, status=scheduled)
   const nextScheduled = useMemo(() => {
     const upcoming = schedule
@@ -332,13 +352,29 @@ export default function Display() {
   // Program overview: shown full-screen between scheduled items and while idle.
   // Driven by user setting on /playout. Hides when:
   //  - kiosk start overlay is up (initial fullscreen prompt)
-  //  - real media (video/image) is being shown (pgm_id is set and is_playing)
+  //  - a scheduled item is currently within its play window (incl. pre-roll)
   //  - the "Next up" overlay is up (so we don't double up text on screen)
   const showProgramOverview =
     !!settings?.program_overview_enabled &&
     !showKioskOverlay &&
     !showNextUp &&
-    idle;
+    !isInScheduledWindow;
+
+  // Pause video element while program overview takes over so we don't get
+  // background audio leaking through the overlay.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (showProgramOverview) {
+      try {
+        v.pause();
+      } catch (_) {
+        /* noop */
+      }
+    } else if (isVideo && state?.is_playing) {
+      v.play().catch(() => {});
+    }
+  }, [showProgramOverview, isVideo, state?.is_playing]);
 
   return (
     <div
@@ -362,12 +398,14 @@ export default function Display() {
         <video
           ref={videoRef}
           data-testid="display-video"
-          className={`w-full h-full object-contain bg-black ${isVideo ? "" : "hidden"}`}
+          className={`w-full h-full object-contain bg-black ${
+            isVideo && !showProgramOverview ? "" : "hidden"
+          }`}
           playsInline
           autoPlay
         />
 
-        {isImage && pgm && (
+        {isImage && pgm && !showProgramOverview && (
           <img
             data-testid="display-image"
             src={thumbUrl(pgm.id)}

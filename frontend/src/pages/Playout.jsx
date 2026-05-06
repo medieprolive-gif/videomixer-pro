@@ -430,6 +430,7 @@ function TimelineGrid({
   currentMediaId,
 }) {
   const containerRef = useRef(null);
+  const draggingIdRef = useRef(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
   const [draggingId, setDraggingId] = useState(null);
 
@@ -459,16 +460,21 @@ function TimelineGrid({
   const handleDragStart = (e, item) => {
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", item.id);
+    // Use a ref so onDragOver can read the current dragging id synchronously
+    // (state updates are async and would race with the dragover that follows
+    // immediately after dragstart, causing preventDefault to be skipped).
+    draggingIdRef.current = item.id;
     setDraggingId(item.id);
   };
   const handleDragEnd = () => {
+    draggingIdRef.current = null;
     setDraggingId(null);
     setDragOverIdx(null);
   };
 
   // Container-level drag handlers — robust against z-index / overlapping items
   const handleContainerDragOver = (e) => {
-    if (!draggingId) return;
+    if (!draggingIdRef.current) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     const idx = slotIndexFromY(e.clientY);
@@ -478,7 +484,8 @@ function TimelineGrid({
   };
   const handleContainerDrop = (e) => {
     e.preventDefault();
-    const id = e.dataTransfer.getData("text/plain") || draggingId;
+    const id = e.dataTransfer.getData("text/plain") || draggingIdRef.current;
+    draggingIdRef.current = null;
     setDragOverIdx(null);
     setDraggingId(null);
     if (!id) return;
