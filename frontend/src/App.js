@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Display from "./pages/Display";
 import Upload from "./pages/Upload";
 import Control from "./pages/Control";
+import Playout from "./pages/Playout";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 function App() {
@@ -38,6 +39,22 @@ function App() {
             element={
               <ProtectedRoute>
                 <Control />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/playout"
+            element={
+              <ProtectedRoute>
+                <Playout />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/playout/:room"
+            element={
+              <ProtectedRoute>
+                <Playout />
               </ProtectedRoute>
             }
           />

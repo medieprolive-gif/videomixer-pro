@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Monitor, UploadCloud, Sliders, ArrowUpRight, Film } from "lucide-react";
+import { Monitor, UploadCloud, Sliders, ArrowUpRight, Film, CalendarClock } from "lucide-react";
 
 const NAV = [
   {
@@ -14,18 +14,26 @@ const NAV = [
   {
     to: () => "/upload",
     label: "Last opp",
-    desc: "Last inn nye videoklipp til systemet (delt bibliotek).",
+    desc: "Last inn nye videoklipp og bilder. Trim og rediger.",
     icon: UploadCloud,
     testid: "nav-upload-link",
     path: () => "/upload",
   },
   {
     to: (room) => (room ? `/control/${room}` : "/control"),
-    label: "Kontrollpanel",
-    desc: "Styr avspilling, volum og spillelister i sanntid.",
+    label: "Switcher",
+    desc: "PVW/PGM live switcher. CUT mellom klipp i sanntid.",
     icon: Sliders,
     testid: "nav-control-link",
     path: (room) => (room ? `/control/${room}` : "/control"),
+  },
+  {
+    to: (room) => (room ? `/playout/${room}` : "/playout"),
+    label: "Playout",
+    desc: "Planlagt avspilling på klokkeslett. Plakat, neste-opp-tekst, automatikk.",
+    icon: CalendarClock,
+    testid: "nav-playout-link",
+    path: (room) => (room ? `/playout/${room}` : "/playout"),
   },
 ];
 
@@ -105,7 +113,7 @@ export default function Landing() {
         </section>
 
         <section
-          className="grid grid-cols-1 md:grid-cols-3 gap-5"
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5"
           data-testid="landing-nav-grid"
         >
           {NAV.map(({ to, label, desc, icon: Icon, testid, path }) => {

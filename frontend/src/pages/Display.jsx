@@ -218,6 +218,43 @@ export default function Display() {
     setShowKioskOverlay(false);
   }, []);
 
+  // Track current playback time + duration for "next up" overlay timing
+  const [pgmTime, setPgmTime] = useState(0);
+  const [pgmDuration, setPgmDuration] = useState(0);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !isVideo) {
+      setPgmTime(0);
+      setPgmDuration(pgm?.duration || 0);
+      return;
+    }
+    const onTime = () => setPgmTime(v.currentTime || 0);
+    const onMeta = () => setPgmDuration(v.duration || 0);
+    v.addEventListener("timeupdate", onTime);
+    v.addEventListener("loadedmetadata", onMeta);
+    return () => {
+      v.removeEventListener("timeupdate", onTime);
+      v.removeEventListener("loadedmetadata", onMeta);
+    };
+  }, [isVideo, pgm?.id, pgm?.duration]);
+
+  // For images, use synced state.current_time as the "elapsed" indicator
+  useEffect(() => {
+    if (isImage && state) {
+      setPgmTime(state.current_time || 0);
+      setPgmDuration(pgm?.duration || 5);
+    }
+  }, [isImage, state?.current_time, pgm?.duration, state]);
+
+  const remaining = Math.max(0, (pgmDuration || 0) - (pgmTime || 0));
+  const showNextUp =
+    !!state?.next_up_text &&
+    !!pgm &&
+    state?.is_playing &&
+    pgmDuration > 0 &&
+    remaining <= 10 &&
+    remaining > 0;
+
   const idle = !state?.pgm_id;
 
   return (
@@ -291,6 +328,25 @@ export default function Display() {
             Sal · {roomId}
           </div>
         </button>
+      )}
+
+      {/* "Neste opp"-overlay (siste 10 sek av PGM) */}
+      {showNextUp && (
+        <div
+          data-testid="display-next-up-overlay"
+          className="absolute bottom-10 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-black/75 backdrop-blur-sm border border-[#F59E0B]/40 px-6 py-3 rounded-md shadow-2xl animate-pulse"
+          style={{ animation: "kk-fade-in 0.4s ease-out" }}
+        >
+          <div className="text-[10px] uppercase tracking-[0.3em] text-[#F59E0B] font-mono font-semibold">
+            Neste opp
+          </div>
+          <div className="text-white font-heading text-lg max-w-2xl truncate">
+            {state.next_up_text}
+          </div>
+          <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 ml-2">
+            {Math.ceil(remaining)}s
+          </div>
+        </div>
       )}
 
       {/* KIOSK indicator (top-right, fades with cursor) */}

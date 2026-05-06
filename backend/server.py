@@ -87,6 +87,86 @@ def open_object_stream(path: str, range_header: Optional[str] = None):
     return resp
 
 
+# ---------- Broadcast scheduler ----------
+async def _next_scheduled_after(room: str, after_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    q: Dict[str, Any] = {"room": room, "status": "scheduled"}
+    if after_id:
+        q["id"] = {"$ne": after_id}
+    return await db.schedule.find_one(q, {"_id": 0}, sort=[("scheduled_at", 1)])
+
+
+async def _play_pre_plakat(item: Dict[str, Any]):
+    state = await get_state_doc(item["room"])
+    state["pgm_id"] = item.get("pre_plakat_id")
+    state["pvw_id"] = item.get("media_id")
+    state["current_time"] = 0
+    state["is_playing"] = True
+    state["next_up_text"] = item.get("title") or ""
+    await save_state(state, item["room"])
+    await broadcast_state(state, item["room"])
+    await db.schedule.update_one({"id": item["id"]}, {"$set": {"status": "pre_playing"}})
+
+
+async def _play_main_item(item: Dict[str, Any]):
+    state = await get_state_doc(item["room"])
+    state["pgm_id"] = item["media_id"]
+    state["current_time"] = 0
+    state["is_playing"] = True
+    state["next_up_text"] = item.get("next_up_text") or ""
+    nxt = await _next_scheduled_after(item["room"], after_id=item["id"])
+    state["pvw_id"] = nxt.get("media_id") if nxt else None
+    await save_state(state, item["room"])
+    await broadcast_state(state, item["room"])
+    await db.schedule.update_one({"id": item["id"]}, {"$set": {"status": "played"}})
+
+
+async def scheduler_tick():
+    now = datetime.now(timezone.utc)
+    # Items currently in pre_playing — advance to main when scheduled_at hits
+    pre_items = await db.schedule.find(
+        {"status": "pre_playing"}, {"_id": 0}
+    ).to_list(50)
+    for item in pre_items:
+        s = item["scheduled_at"]
+        if isinstance(s, str):
+            s = datetime.fromisoformat(s)
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=timezone.utc)
+        if s <= now:
+            await _play_main_item(item)
+
+    # Scheduled items due (with pre-plakat consideration)
+    items = await db.schedule.find(
+        {"status": "scheduled"}, {"_id": 0}
+    ).sort("scheduled_at", 1).to_list(500)
+    for item in items:
+        s = item["scheduled_at"]
+        if isinstance(s, str):
+            s = datetime.fromisoformat(s)
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=timezone.utc)
+        pre_id = item.get("pre_plakat_id")
+        pre_dur = float(item.get("pre_plakat_duration") or 0)
+        if pre_id and pre_dur > 0:
+            pre_start = s - timedelta(seconds=pre_dur)
+            if pre_start <= now < s:
+                await _play_pre_plakat(item)
+                continue
+        if s <= now:
+            await _play_main_item(item)
+
+
+async def scheduler_loop():
+    while True:
+        try:
+            await asyncio.sleep(2)
+            await scheduler_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("scheduler tick failed")
+
+
 # ---------- App ----------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -95,9 +175,16 @@ async def lifespan(_app: FastAPI):
         logger.info("Storage initialized")
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
-    # Ensure default room state exists
     await get_state_doc(DEFAULT_ROOM)
+
+    sched_task = asyncio.create_task(scheduler_loop())
+    logger.info("Broadcast scheduler started")
     yield
+    sched_task.cancel()
+    try:
+        await sched_task
+    except asyncio.CancelledError:
+        pass
     client.close()
 
 
@@ -595,20 +682,20 @@ def _default_state(room: str) -> Dict[str, Any]:
         "volume": 1.0,
         "muted": False,
         "loop": False,
+        "next_up_text": "",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def _migrate_state(s: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure legacy state docs have the PVW/PGM fields."""
-    changed = False
+    """Ensure legacy state docs have all expected fields."""
     if "pgm_id" not in s:
         s["pgm_id"] = s.pop("current_video_id", None)
-        changed = True
     if "pvw_id" not in s:
         s["pvw_id"] = None
-        changed = True
-    return s if not changed else s
+    if "next_up_text" not in s:
+        s["next_up_text"] = ""
+    return s
 
 
 def _normalize_room(room: Optional[str]) -> str:
@@ -651,6 +738,138 @@ async def get_state(room: str = Query(DEFAULT_ROOM)):
 @api_router.get("/rooms")
 async def get_rooms():
     return {"rooms": await list_rooms()}
+
+
+# ---------- Room settings (global bumper) ----------
+class RoomSettingsModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    room: str
+    global_bumper_id: Optional[str] = None
+    global_bumper_duration: float = 5.0
+
+
+@api_router.get("/rooms/{room}/settings", response_model=RoomSettingsModel)
+async def get_room_settings(room: str):
+    room = _normalize_room(room)
+    s = await db.room_settings.find_one({"room": room}, {"_id": 0})
+    if not s:
+        s = {"room": room, "global_bumper_id": None, "global_bumper_duration": 5.0}
+    return RoomSettingsModel(**s)
+
+
+@api_router.put("/rooms/{room}/settings", response_model=RoomSettingsModel)
+async def set_room_settings(room: str, payload: RoomSettingsModel, _: bool = Depends(require_auth)):
+    room = _normalize_room(room)
+    doc = {
+        "room": room,
+        "global_bumper_id": payload.global_bumper_id,
+        "global_bumper_duration": float(payload.global_bumper_duration or 5.0),
+    }
+    await db.room_settings.update_one({"room": room}, {"$set": doc}, upsert=True)
+    return RoomSettingsModel(**doc)
+
+
+# ---------- Schedule (broadcast playout) ----------
+class ScheduleIn(BaseModel):
+    room: str = DEFAULT_ROOM
+    scheduled_at: datetime
+    media_id: str
+    title: Optional[str] = ""
+    next_up_text: Optional[str] = ""
+    pre_plakat_id: Optional[str] = None
+    pre_plakat_duration: Optional[float] = 0.0
+
+
+class SchedulePatch(BaseModel):
+    scheduled_at: Optional[datetime] = None
+    media_id: Optional[str] = None
+    title: Optional[str] = None
+    next_up_text: Optional[str] = None
+    pre_plakat_id: Optional[str] = None
+    pre_plakat_duration: Optional[float] = None
+    status: Optional[str] = None
+
+
+class ScheduleOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    room: str
+    scheduled_at: str
+    media_id: str
+    title: str = ""
+    next_up_text: str = ""
+    pre_plakat_id: Optional[str] = None
+    pre_plakat_duration: float = 0.0
+    status: str = "scheduled"
+    created_at: str
+
+
+def _serialize_schedule(item: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(item)
+    s = out.get("scheduled_at")
+    if isinstance(s, datetime):
+        out["scheduled_at"] = s.isoformat()
+    return out
+
+
+@api_router.get("/schedule", response_model=List[ScheduleOut])
+async def list_schedule(room: str = Query(DEFAULT_ROOM)):
+    items = await db.schedule.find(
+        {"room": _normalize_room(room)}, {"_id": 0}
+    ).sort("scheduled_at", 1).to_list(500)
+    return [ScheduleOut(**_serialize_schedule(i)) for i in items]
+
+
+@api_router.post("/schedule", response_model=ScheduleOut)
+async def create_schedule(payload: ScheduleIn, _: bool = Depends(require_auth)):
+    media = await db.videos.find_one({"id": payload.media_id, "is_deleted": False}, {"_id": 0})
+    if not media:
+        raise HTTPException(status_code=404, detail="Media ikke funnet")
+    sched_at = payload.scheduled_at
+    if sched_at.tzinfo is None:
+        sched_at = sched_at.replace(tzinfo=timezone.utc)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "room": _normalize_room(payload.room),
+        "scheduled_at": sched_at,
+        "media_id": payload.media_id,
+        "title": payload.title or media.get("filename", ""),
+        "next_up_text": payload.next_up_text or "",
+        "pre_plakat_id": payload.pre_plakat_id,
+        "pre_plakat_duration": float(payload.pre_plakat_duration or 0.0),
+        "status": "scheduled",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.schedule.insert_one(doc.copy())
+    return ScheduleOut(**_serialize_schedule(doc))
+
+
+@api_router.patch("/schedule/{sched_id}", response_model=ScheduleOut)
+async def patch_schedule(sched_id: str, payload: SchedulePatch, _: bool = Depends(require_auth)):
+    record = await db.schedule.find_one({"id": sched_id}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="Innslag ikke funnet")
+    update: Dict[str, Any] = {}
+    data = payload.dict(exclude_unset=True)
+    for k, v in data.items():
+        if k == "scheduled_at" and v is not None:
+            if isinstance(v, datetime) and v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
+            update[k] = v
+        elif v is not None:
+            update[k] = v
+    if update:
+        await db.schedule.update_one({"id": sched_id}, {"$set": update})
+        record.update(update)
+    return ScheduleOut(**_serialize_schedule(record))
+
+
+@api_router.delete("/schedule/{sched_id}")
+async def delete_schedule(sched_id: str, _: bool = Depends(require_auth)):
+    res = await db.schedule.delete_one({"id": sched_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Ikke funnet")
+    return {"ok": True}
 
 
 # ---------- WebSocket sync ----------
@@ -811,6 +1030,21 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
                 ended_id = msg.get("video_id") or msg.get("media_id")
                 if ended_id == state.get("pgm_id"):
                     state["is_playing"] = False
+                    # Broadcast playout: if room has a global bumper AND there's a
+                    # next scheduled item, transition to bumper to fill the gap.
+                    rs = await db.room_settings.find_one({"room": room}, {"_id": 0})
+                    if rs and rs.get("global_bumper_id"):
+                        nxt = await db.schedule.find_one(
+                            {"room": room, "status": "scheduled"},
+                            {"_id": 0},
+                            sort=[("scheduled_at", 1)],
+                        )
+                        if nxt:
+                            state["pgm_id"] = rs["global_bumper_id"]
+                            state["pvw_id"] = nxt.get("media_id")
+                            state["is_playing"] = True
+                            state["current_time"] = 0
+                            state["next_up_text"] = nxt.get("title") or ""
 
             await save_state(state, room)
             await broadcast_state(state, room)
