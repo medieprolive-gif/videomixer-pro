@@ -856,6 +856,12 @@ def _serialize_schedule(item: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(item)
     s = out.get("scheduled_at")
     if isinstance(s, datetime):
+        # MongoDB returns naive datetimes (UTC). Tag them with UTC tz so the
+        # ISO string contains "+00:00" — otherwise the browser parses the bare
+        # ISO as LOCAL time, which causes the displayed hour to shift by the
+        # client's UTC offset (e.g. Norway summer = -2h, winter = -1h).
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=timezone.utc)
         out["scheduled_at"] = s.isoformat()
     return out
 
