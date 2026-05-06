@@ -35,19 +35,30 @@
 - [x] Cinematic dark theme with cinema-marquee gold (#F59E0B), grain texture, Outfit/Manrope/JetBrains Mono fonts
 - [x] All interactive elements have data-testid
 
-## Test Results (Iteration 1)
-- Backend: 17/17 pytest tests passed (auth, CRUD, range streaming, WS auth/broadcast)
-- Frontend: All flows verified (login, upload, control, display, WS sync)
+## Implemented (2026-02, session 2)
+- [x] Multi-room WebSocket isolation (`/control/:room`, `/display/:room`, `/playout/:room`)
+- [x] PVW/PGM broadcast switcher with CUT button, mobile/PC layouts, side-by-side monitors
+- [x] Image media support with configurable still duration
+- [x] Video thumbnail extraction + refresh on reload
+- [x] FFmpeg video trimming modal with In/Out slider + Undo history
+- [x] Fullscreen Kiosk mode on `/display` with "Neste opp" overlay (last 10s)
+- [x] Background playout scheduler (asyncio loop) with global bumpers + pre-plakat images
+- [x] `/playout` visual timeline grid: 15-min slots 06:00–24:00, click-to-schedule, click-item-to-edit modal, day navigation, status badges, "on air" indicator (2026-02-06)
+
+## Test Results (Iteration 4, 2026-02-06)
+- Backend: iteration_1 (17/17) + iteration_2 + iteration_3 all green; iteration_4 added `/app/backend/tests/test_playout.py` covering schedule CRUD/auth/404 + room settings (8 pass, 5 fixture-only errors unrelated to product)
+- Frontend E2E (Playwright smoke): click empty slot → modal with pre-filled time ✓, create/edit/delete item ✓, ESC close ✓, day nav ✓, "Nytt innslag" default 20:00 ✓
 
 ## Backlog
 ### P1
+- Drag & drop items between timeline slots
+- Visual duration block spanning multiple slots (proportional to media duration)
+- "N items outside visible 06:00–24:00 range" hint on timeline
+### P2
+- Weekly view (7 days side by side) for playout
+- Duplicate/copy schedule item to another time
+- Split `server.py` into routes/, models/, services/ modules (file is growing large)
 - Stream video with chunked passthrough (currently loads full bytes — fine for small clips, OOM risk for large)
 - Wrap synchronous storage calls in `asyncio.to_thread`
-- Add max upload size guard
-### P2
 - Migrate `@app.on_event` to FastAPI lifespan
-- Toast on WS unauthorized error
-- Multi-room support (currently single global state)
-- Video thumbnails on upload
 - Crossfade transitions between clips on display
-- Schedule / playlist auto-advance modes (random, sequential)
