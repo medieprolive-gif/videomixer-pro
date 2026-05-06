@@ -44,6 +44,7 @@
 - [x] Fullscreen Kiosk mode on `/display` with "Neste opp" overlay (last 10s)
 - [x] Background playout scheduler (asyncio loop) with global bumpers + pre-plakat images
 - [x] `/playout` visual timeline grid: 15-min slots 06:00–24:00, click-to-schedule, click-item-to-edit modal, day navigation, status badges, "on air" indicator (2026-02-06)
+- [x] `/display` schedule ticker: subtle bottom-left strip showing next upcoming scheduled item ("Neste 20:00 · Nyhetene — om 7 min"), auto-polls every 15s, hides during "Neste opp" overlay (2026-02-06)
 
 ## Test Results (Iteration 4, 2026-02-06)
 - Backend: iteration_1 (17/17) + iteration_2 + iteration_3 all green; iteration_4 added `/app/backend/tests/test_playout.py` covering schedule CRUD/auth/404 + room settings (8 pass, 5 fixture-only errors unrelated to product)

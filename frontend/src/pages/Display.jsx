@@ -51,6 +51,8 @@ export default function Display() {
   const { state, sendPublic } = useSync(roomId);
 
   const [media, setMedia] = useState([]);
+  const [schedule, setSchedule] = useState([]);
+  const [now, setNow] = useState(Date.now());
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const [currentSrcId, setCurrentSrcId] = useState(null);
@@ -76,6 +78,25 @@ export default function Display() {
     // Refetch when pgm changes (e.g., new uploads while open)
     loadMedia();
   }, [state?.pgm_id, loadMedia]);
+
+  // Load + poll schedule for "next scheduled" ticker
+  const loadSchedule = useCallback(async () => {
+    try {
+      const r = await api.get("/schedule", { params: { room: roomId } });
+      setSchedule(r.data || []);
+    } catch (_) {
+      /* noop */
+    }
+  }, [roomId]);
+  useEffect(() => {
+    loadSchedule();
+    const i = setInterval(loadSchedule, 15000);
+    return () => clearInterval(i);
+  }, [loadSchedule]);
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(i);
+  }, []);
 
   const pgm = useMemo(
     () => media.find((m) => m.id === state?.pgm_id) || null,
@@ -257,6 +278,37 @@ export default function Display() {
 
   const idle = !state?.pgm_id;
 
+  // Next scheduled item (upcoming, status=scheduled)
+  const nextScheduled = useMemo(() => {
+    const upcoming = schedule
+      .filter((s) => s.status === "scheduled" && new Date(s.scheduled_at).getTime() > now)
+      .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
+    return upcoming[0] || null;
+  }, [schedule, now]);
+
+  const nextScheduledLabel = useMemo(() => {
+    if (!nextScheduled) return null;
+    const dt = new Date(nextScheduled.scheduled_at);
+    const hh = String(dt.getHours()).padStart(2, "0");
+    const mm = String(dt.getMinutes()).padStart(2, "0");
+    const m = media.find((x) => x.id === nextScheduled.media_id);
+    const title = nextScheduled.title || m?.filename || "—";
+    const diffMs = dt.getTime() - now;
+    const diffMin = Math.round(diffMs / 60000);
+    let rel = "";
+    if (diffMin < 1) rel = "straks";
+    else if (diffMin < 60) rel = `om ${diffMin} min`;
+    else {
+      const h = Math.floor(diffMin / 60);
+      const mRest = diffMin % 60;
+      rel = mRest ? `om ${h}t ${mRest}m` : `om ${h}t`;
+    }
+    return { time: `${hh}:${mm}`, title, rel };
+  }, [nextScheduled, media, now]);
+
+  // Show schedule ticker when idle OR not overlapping with "next up"-overlay
+  const showScheduleTicker = !!nextScheduledLabel && !showNextUp && !showKioskOverlay;
+
   return (
     <div
       ref={containerRef}
@@ -346,6 +398,30 @@ export default function Display() {
           <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 ml-2">
             {Math.ceil(remaining)}s
           </div>
+        </div>
+      )}
+
+      {/* Neste innslag (fra spillelisten) – vises kontinuerlig nederst */}
+      {showScheduleTicker && (
+        <div
+          data-testid="display-schedule-ticker"
+          className="absolute bottom-4 left-4 z-20 flex items-center gap-3 bg-black/55 backdrop-blur-md border border-white/10 px-4 py-2 rounded-md shadow-xl"
+          style={{ animation: "kk-fade-in 0.5s ease-out" }}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B] animate-pulse" />
+          <span className="text-[10px] uppercase tracking-[0.3em] text-[#F59E0B] font-mono font-semibold">
+            Neste
+          </span>
+          <span className="font-mono text-sm text-white tracking-wider">
+            {nextScheduledLabel.time}
+          </span>
+          <span className="text-zinc-600">·</span>
+          <span className="text-white font-heading text-sm max-w-[40ch] truncate">
+            {nextScheduledLabel.title}
+          </span>
+          <span className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500">
+            {nextScheduledLabel.rel}
+          </span>
         </div>
       )}
 
