@@ -81,6 +81,7 @@ const EMPTY_DRAFT = {
   next_up_text: "",
   pre_plakat_id: "",
   pre_plakat_duration: 5,
+  duration_minutes: 60,
 };
 
 /** Modal for creating or editing a schedule entry. */
@@ -97,6 +98,7 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
         next_up_text: item.next_up_text || "",
         pre_plakat_id: item.pre_plakat_id || "",
         pre_plakat_duration: item.pre_plakat_duration || 5,
+        duration_minutes: item.duration_minutes || 60,
       });
     } else {
       setDraft({ ...EMPTY_DRAFT, scheduled_at: initialTime || "" });
@@ -134,6 +136,7 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
         next_up_text: draft.next_up_text,
         pre_plakat_id: draft.pre_plakat_id || null,
         pre_plakat_duration: draft.pre_plakat_id ? parseFloat(draft.pre_plakat_duration) || 0 : 0,
+        duration_minutes: Math.max(5, parseInt(draft.duration_minutes, 10) || 60),
       };
       if (mode === "edit" && item) {
         await api.patch(`/schedule/${item.id}`, payload);
@@ -297,6 +300,37 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
                 className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B] disabled:opacity-40"
               />
             </div>
+            <div className="md:col-span-2">
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1">
+                Lengde i tidslinje (minutter)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={5}
+                  step={5}
+                  max={720}
+                  value={draft.duration_minutes}
+                  onChange={(e) => setDraft({ ...draft, duration_minutes: e.target.value })}
+                  data-testid="playout-modal-duration"
+                  className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
+                />
+                {[15, 30, 45, 60, 90, 120].map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setDraft({ ...draft, duration_minutes: m })}
+                    className={`text-[10px] uppercase tracking-[0.15em] px-2.5 py-2 border rounded transition-colors ${
+                      Number(draft.duration_minutes) === m
+                        ? "border-[#F59E0B]/60 text-[#F59E0B] bg-[#F59E0B]/10"
+                        : "border-white/10 text-zinc-500 hover:text-white hover:border-white/30"
+                    }`}
+                  >
+                    {m}m
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -348,33 +382,76 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
   );
 }
 
-/** Vertical timeline grid with quarter-hour clickable slots. */
-function TimelineGrid({ items, media, date, onSlotClick, onItemClick, currentMediaId }) {
-  // Generate slots from 06:00 to 24:00 in 15-min increments
-  const slots = useMemo(() => {
+/**
+ * Vertical timeline with absolute-positioned item blocks.
+ * - Each scheduled item is rendered as a single block whose height equals its
+ *   `duration_minutes` (rounded to 15-min slots).
+ * - Items are draggable: dropping on an empty slot patches `scheduled_at` to
+ *   that slot's time on the same day.
+ */
+const SLOT_PX = 44;
+const HOURS_START = 6;
+const HOURS_END = 24;
+const TOTAL_SLOTS = (HOURS_END - HOURS_START) * 4; // 72
+const TIMELINE_HEIGHT = TOTAL_SLOTS * SLOT_PX;
+const TIME_COL_WIDTH = 80;
+
+function slotIndexFromTime(hours, minutes) {
+  return ((hours - HOURS_START) * 60 + minutes) / 15;
+}
+
+function TimelineGrid({
+  items,
+  media,
+  date,
+  onSlotClick,
+  onItemClick,
+  onItemMove,
+  currentMediaId,
+}) {
+  const [dragOverIdx, setDragOverIdx] = useState(null);
+  const [draggingId, setDraggingId] = useState(null);
+
+  const dayItems = useMemo(
+    () => items.filter((it) => ymd(new Date(it.scheduled_at)) === date),
+    [items, date]
+  );
+
+  const slotKeys = useMemo(() => {
     const out = [];
-    for (let h = 6; h < 24; h++) {
-      for (let q = 0; q < 4; q++) {
-        out.push({ h, m: q * 15 });
-      }
+    for (let i = 0; i < TOTAL_SLOTS; i++) {
+      const total = HOURS_START * 60 + i * 15;
+      const h = Math.floor(total / 60);
+      const m = total % 60;
+      out.push({ idx: i, h, m, key: `${pad(h)}:${pad(m)}`, isHour: m === 0 });
     }
     return out;
   }, []);
 
-  // Build a map from "HH:MM" key (rounded down to nearest quarter) → list of items
-  const itemsBySlot = useMemo(() => {
-    const map = new Map();
-    items.forEach((it) => {
-      const dt = new Date(it.scheduled_at);
-      if (ymd(dt) !== date) return;
-      const h = dt.getHours();
-      const m = Math.floor(dt.getMinutes() / 15) * 15;
-      const key = `${pad(h)}:${pad(m)}`;
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(it);
-    });
-    return map;
-  }, [items, date]);
+  const handleDragStart = (e, item) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", item.id);
+    setDraggingId(item.id);
+  };
+  const handleDragEnd = () => {
+    setDraggingId(null);
+    setDragOverIdx(null);
+  };
+  const handleDragOver = (e, idx) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOverIdx !== idx) setDragOverIdx(idx);
+  };
+  const handleDrop = (e, idx) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData("text/plain");
+    setDragOverIdx(null);
+    setDraggingId(null);
+    if (!id) return;
+    const slot = slotKeys[idx];
+    if (!slot) return;
+    onItemMove?.(id, `${date}T${slot.key}`);
+  };
 
   return (
     <div
@@ -386,106 +463,147 @@ function TimelineGrid({ items, media, date, onSlotClick, onItemClick, currentMed
           Tidslinje · {date}
         </div>
         <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-600 font-mono">
-          06:00 – 24:00 · klikk for å legge til
+          06:00 – 24:00 · klikk eller dra for å plassere
         </div>
       </div>
-      <ul className="divide-y divide-white/5">
-        {slots.map(({ h, m }) => {
-          const key = `${pad(h)}:${pad(m)}`;
-          const slotItems = itemsBySlot.get(key) || [];
-          const isHourBoundary = m === 0;
+
+      <div className="relative" style={{ height: TIMELINE_HEIGHT }}>
+        {/* Background slot rows (lines + drop targets + click-to-add) */}
+        {slotKeys.map((slot) => {
+          const top = slot.idx * SLOT_PX;
+          const isDragOver = dragOverIdx === slot.idx;
           return (
-            <li
-              key={key}
-              className={`relative ${isHourBoundary ? "border-t-2 border-white/10" : ""}`}
+            <div
+              key={slot.key}
+              className={`absolute left-0 right-0 ${
+                slot.isHour ? "border-t-2 border-white/10" : "border-t border-white/5"
+              }`}
+              style={{ top, height: SLOT_PX }}
             >
-              <div className="flex items-stretch">
-                <div
-                  className={`w-20 shrink-0 border-r border-white/5 px-3 py-2.5 font-mono text-xs ${
-                    isHourBoundary ? "text-[#F59E0B]" : "text-zinc-600"
-                  }`}
-                >
-                  {key}
-                </div>
-                <div className="flex-1 min-w-0 p-1.5">
-                  {slotItems.length === 0 ? (
-                    <button
-                      onClick={() => onSlotClick(`${date}T${key}`)}
-                      data-testid="playout-empty-slot"
-                      data-time={key}
-                      className="w-full h-9 rounded border border-dashed border-white/5 hover:border-[#F59E0B]/40 hover:bg-[#F59E0B]/5 text-zinc-700 hover:text-[#F59E0B] transition-colors flex items-center justify-center group"
-                    >
-                      <Plus className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-                    </button>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {slotItems.map((it) => {
-                        const mediaItem = media.find((x) => x.id === it.media_id);
-                        const pre = it.pre_plakat_id ? media.find((x) => x.id === it.pre_plakat_id) : null;
-                        const isOnAir = currentMediaId === it.media_id || currentMediaId === it.pre_plakat_id;
-                        return (
-                          <button
-                            key={it.id}
-                            onClick={() => onItemClick(it)}
-                            data-testid="playout-timeline-item"
-                            className={`w-full text-left rounded border px-3 py-2 flex items-center gap-3 transition-colors ${
-                              isOnAir
-                                ? "border-red-500/50 bg-red-500/10 hover:bg-red-500/15"
-                                : it.status === "played"
-                                ? "border-white/5 bg-black/30 opacity-60 hover:opacity-100"
-                                : it.status === "pre_playing"
-                                ? "border-emerald-500/40 bg-emerald-500/5"
-                                : "border-[#F59E0B]/30 bg-[#F59E0B]/5 hover:bg-[#F59E0B]/10"
-                            }`}
-                          >
-                            {isOnAir && (
-                              <span
-                                className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shrink-0"
-                                title="On air"
-                              />
-                            )}
-                            <div className="w-10 h-7 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
-                              {mediaItem?.has_thumbnail ? (
-                                <img src={thumbUrl(mediaItem.id)} alt="" className="w-full h-full object-cover" />
-                              ) : mediaItem?.media_type === "image" ? (
-                                <ImageIcon className="w-3.5 h-3.5 text-[#F59E0B]" />
-                              ) : (
-                                <Film className="w-3.5 h-3.5 text-zinc-500" />
-                              )}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm text-white truncate">
-                                  {it.title || mediaItem?.filename || "?"}
-                                </span>
-                                <StatusBadge status={it.status} />
-                              </div>
-                              <div className="text-[10px] font-mono text-zinc-600 truncate">
-                                {pre && (
-                                  <span className="text-emerald-400/70 mr-3">
-                                    Plakat: {pre.filename} · {it.pre_plakat_duration}s
-                                  </span>
-                                )}
-                                {it.next_up_text && (
-                                  <span className="text-[#F59E0B]/70">→ {it.next_up_text}</span>
-                                )}
-                              </div>
-                            </div>
-                            <span className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-600 shrink-0">
-                              {pad(new Date(it.scheduled_at).getHours())}:
-                              {pad(new Date(it.scheduled_at).getMinutes())}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+              <div
+                className={`absolute left-0 top-0 h-full px-3 py-2.5 font-mono text-xs select-none pointer-events-none ${
+                  slot.isHour ? "text-[#F59E0B]" : "text-zinc-600"
+                }`}
+                style={{ width: TIME_COL_WIDTH }}
+              >
+                {slot.key}
               </div>
-            </li>
+              {/* Drop / click target */}
+              <div
+                role="button"
+                tabIndex={-1}
+                data-testid="playout-empty-slot"
+                data-time={slot.key}
+                onClick={() => onSlotClick(`${date}T${slot.key}`)}
+                onDragOver={(e) => handleDragOver(e, slot.idx)}
+                onDragLeave={() => setDragOverIdx((v) => (v === slot.idx ? null : v))}
+                onDrop={(e) => handleDrop(e, slot.idx)}
+                className={`absolute top-0 bottom-0 cursor-pointer transition-colors ${
+                  isDragOver
+                    ? "bg-[#F59E0B]/15 border border-[#F59E0B]/60"
+                    : "hover:bg-[#F59E0B]/5"
+                }`}
+                style={{ left: TIME_COL_WIDTH, right: 0 }}
+              />
+            </div>
           );
         })}
-      </ul>
+
+        {/* Items (absolute, on top, span across slots based on duration) */}
+        {dayItems.map((it) => {
+          const dt = new Date(it.scheduled_at);
+          const startIdx = slotIndexFromTime(dt.getHours(), dt.getMinutes());
+          if (startIdx < 0 || startIdx >= TOTAL_SLOTS) return null;
+          const dur = Math.max(15, Number(it.duration_minutes) || 15);
+          const endMinutes = dt.getHours() * 60 + dt.getMinutes() + dur;
+          const endHours = Math.floor(endMinutes / 60);
+          const endMins = endMinutes % 60;
+          const endLabel = `${pad(endHours)}:${pad(endMins)}`;
+          const heightPx = (dur / 15) * SLOT_PX - 4;
+          const top = startIdx * SLOT_PX + 2;
+          const mediaItem = media.find((x) => x.id === it.media_id);
+          const pre = it.pre_plakat_id ? media.find((x) => x.id === it.pre_plakat_id) : null;
+          const isOnAir =
+            currentMediaId === it.media_id || currentMediaId === it.pre_plakat_id;
+          const isDragging = draggingId === it.id;
+          const isCompact = heightPx < 56;
+          return (
+            <div
+              key={it.id}
+              draggable
+              onDragStart={(e) => handleDragStart(e, it)}
+              onDragEnd={handleDragEnd}
+              onClick={() => onItemClick(it)}
+              data-testid="playout-timeline-item"
+              data-time={`${pad(dt.getHours())}:${pad(dt.getMinutes())}`}
+              style={{
+                top,
+                height: Math.max(SLOT_PX - 4, heightPx),
+                left: TIME_COL_WIDTH + 6,
+                right: 8,
+                opacity: isDragging ? 0.4 : 1,
+              }}
+              className={`absolute z-10 cursor-move rounded border px-3 py-2 flex flex-col gap-1 transition-colors overflow-hidden shadow-lg ${
+                isOnAir
+                  ? "border-red-500/60 bg-red-500/15 hover:bg-red-500/20"
+                  : it.status === "played"
+                  ? "border-white/10 bg-black/40 hover:bg-black/50"
+                  : it.status === "pre_playing"
+                  ? "border-emerald-500/50 bg-emerald-500/10 hover:bg-emerald-500/15"
+                  : "border-[#F59E0B]/40 bg-[#F59E0B]/10 hover:bg-[#F59E0B]/15 hover:border-[#F59E0B]/70"
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                {isOnAir && (
+                  <span
+                    className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shrink-0"
+                    title="On air"
+                  />
+                )}
+                <div className="w-8 h-6 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                  {mediaItem?.has_thumbnail ? (
+                    <img
+                      src={thumbUrl(mediaItem.id)}
+                      alt=""
+                      className="w-full h-full object-cover"
+                    />
+                  ) : mediaItem?.media_type === "image" ? (
+                    <ImageIcon className="w-3 h-3 text-[#F59E0B]" />
+                  ) : (
+                    <Film className="w-3 h-3 text-zinc-500" />
+                  )}
+                </div>
+                <span className="text-sm text-white truncate flex-1 min-w-0">
+                  {it.title || mediaItem?.filename || "?"}
+                </span>
+                <StatusBadge status={it.status} />
+              </div>
+
+              {!isCompact && (
+                <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 mt-auto">
+                  <span className="text-[#F59E0B] font-semibold">
+                    {pad(dt.getHours())}:{pad(dt.getMinutes())} – {endLabel}
+                  </span>
+                  <span className="text-zinc-500 uppercase tracking-[0.15em]">
+                    {dur} min
+                  </span>
+                </div>
+              )}
+
+              {!isCompact && pre && (
+                <div className="text-[10px] font-mono text-emerald-400/70 truncate">
+                  Plakat: {pre.filename} · {it.pre_plakat_duration}s
+                </div>
+              )}
+              {!isCompact && it.next_up_text && (
+                <div className="text-[10px] font-mono text-[#F59E0B]/70 truncate">
+                  → {it.next_up_text}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -616,6 +734,29 @@ export default function Playout() {
     d.setDate(d.getDate() + days);
     setDate(ymd(d));
   };
+
+  // Move an item to a new time slot via drag & drop. The new time uses the
+  // same calendar date as the slot the user dropped on; we keep the original
+  // duration/media/etc untouched.
+  const moveItem = useCallback(
+    async (id, localDateTime) => {
+      const iso = localInputToIso(localDateTime);
+      if (!iso) return;
+      // Optimistic update
+      setItems((cur) =>
+        cur.map((it) => (it.id === id ? { ...it, scheduled_at: iso } : it))
+      );
+      try {
+        await api.patch(`/schedule/${id}`, { scheduled_at: iso });
+        toast.success("Innslag flyttet");
+        loadAll();
+      } catch (e) {
+        toast.error("Flytting feilet");
+        loadAll();
+      }
+    },
+    [loadAll]
+  );
 
   return (
     <div className="min-h-screen bg-[#050505]">
@@ -1005,6 +1146,7 @@ export default function Playout() {
             currentMediaId={state?.pgm_id}
             onSlotClick={(time) => setEditing({ mode: "create", initialTime: time })}
             onItemClick={(it) => setEditing({ mode: "edit", item: it })}
+            onItemMove={moveItem}
           />
         </section>
       </main>

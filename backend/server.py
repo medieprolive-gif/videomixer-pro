@@ -826,6 +826,7 @@ class ScheduleIn(BaseModel):
     next_up_text: Optional[str] = ""
     pre_plakat_id: Optional[str] = None
     pre_plakat_duration: Optional[float] = 0.0
+    duration_minutes: Optional[int] = 15
 
 
 class SchedulePatch(BaseModel):
@@ -835,6 +836,7 @@ class SchedulePatch(BaseModel):
     next_up_text: Optional[str] = None
     pre_plakat_id: Optional[str] = None
     pre_plakat_duration: Optional[float] = None
+    duration_minutes: Optional[int] = None
     status: Optional[str] = None
 
 
@@ -848,6 +850,7 @@ class ScheduleOut(BaseModel):
     next_up_text: str = ""
     pre_plakat_id: Optional[str] = None
     pre_plakat_duration: float = 0.0
+    duration_minutes: int = 15
     status: str = "scheduled"
     created_at: str
 
@@ -891,6 +894,7 @@ async def create_schedule(payload: ScheduleIn, _: bool = Depends(require_auth)):
         "next_up_text": payload.next_up_text or "",
         "pre_plakat_id": payload.pre_plakat_id,
         "pre_plakat_duration": float(payload.pre_plakat_duration or 0.0),
+        "duration_minutes": int(max(5, min(720, payload.duration_minutes or 15))),
         "status": "scheduled",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
