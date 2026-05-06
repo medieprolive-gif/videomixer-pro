@@ -63,12 +63,22 @@ function PvwMonitor({ media }) {
     const onTime = () => setTime(v.currentTime || 0);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
+    const onLoaded = () => {
+      // Force first-frame paint so the user sees a thumbnail-like still.
+      try {
+        if (v.currentTime === 0) v.currentTime = 0.001;
+      } catch (_) {
+        /* noop */
+      }
+    };
     v.addEventListener("loadedmetadata", onMeta);
+    v.addEventListener("loadeddata", onLoaded);
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
     return () => {
       v.removeEventListener("loadedmetadata", onMeta);
+      v.removeEventListener("loadeddata", onLoaded);
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
@@ -115,7 +125,8 @@ function PvwMonitor({ media }) {
           ref={videoRef}
           muted
           playsInline
-          preload="metadata"
+          preload="auto"
+          poster={media?.has_thumbnail ? thumbUrl(media.id) : undefined}
           className={`w-full h-full object-contain ${isVideo ? "" : "hidden"}`}
         />
         {isImage && (
@@ -260,7 +271,10 @@ function PgmMonitor({ media, state }) {
         <video
           ref={videoRef}
           playsInline
-          preload="metadata"
+          preload="auto"
+          autoPlay
+          muted
+          poster={media?.has_thumbnail ? thumbUrl(media.id) : undefined}
           className={`w-full h-full object-contain ${isVideo ? "" : "hidden"}`}
         />
         {isImage && (

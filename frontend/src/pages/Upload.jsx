@@ -16,6 +16,96 @@ function formatSize(bytes) {
   return `${s.toFixed(1)} ${units[i]}`;
 }
 
+/**
+ * Extract a JPEG still frame from a video File via <video> + canvas.
+ * Returns a Blob, or null if extraction fails.
+ */
+function captureThumbnail(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement("video");
+    v.preload = "auto";
+    v.muted = true;
+    v.playsInline = true;
+    v.src = url;
+
+    let settled = false;
+    const finish = (blob) => {
+      if (settled) return;
+      settled = true;
+      try {
+        URL.revokeObjectURL(url);
+      } catch (_) {
+        /* noop */
+      }
+      try {
+        v.src = "";
+        v.load();
+      } catch (_) {
+        /* noop */
+      }
+      resolve(blob);
+    };
+
+    const grab = () => {
+      try {
+        const w = v.videoWidth || 0;
+        const h = v.videoHeight || 0;
+        if (!w || !h) {
+          finish(null);
+          return;
+        }
+        const maxW = 480;
+        const ratio = Math.min(1, maxW / w);
+        const cw = Math.max(1, Math.round(w * ratio));
+        const ch = Math.max(1, Math.round(h * ratio));
+        const canvas = document.createElement("canvas");
+        canvas.width = cw;
+        canvas.height = ch;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(v, 0, 0, cw, ch);
+        canvas.toBlob(
+          (b) => finish(b && b.size > 100 ? b : null),
+          "image/jpeg",
+          0.82
+        );
+      } catch (_) {
+        finish(null);
+      }
+    };
+
+    v.addEventListener("loadeddata", () => {
+      // Seek to ~10% (capped at 1s) to skip a black/lead-in first frame
+      const target = Math.min(1, Math.max(0.1, (v.duration || 1) * 0.1));
+      let seekFired = false;
+      const onSeeked = () => {
+        seekFired = true;
+        v.removeEventListener("seeked", onSeeked);
+        grab();
+      };
+      v.addEventListener("seeked", onSeeked);
+      try {
+        v.currentTime = target;
+      } catch (_) {
+        v.removeEventListener("seeked", onSeeked);
+        grab();
+      }
+      // Some codecs don't fire seeked reliably — fall back after 1.2s
+      setTimeout(() => {
+        if (!seekFired && !settled) {
+          v.removeEventListener("seeked", onSeeked);
+          grab();
+        }
+      }, 1200);
+    });
+
+    v.addEventListener("error", () => finish(null));
+
+    // Hard timeout
+    setTimeout(() => finish(null), 10000);
+  });
+}
+
 export default function Upload() {
   const [videos, setVideos] = useState([]);
   const [dragOver, setDragOver] = useState(false);
@@ -117,6 +207,34 @@ export default function Upload() {
       setVideos((vs) => vs.map((v) => (v.id === id ? { ...v, duration: safe } : v)));
     } catch (_) {
       toast.error("Klarte ikke oppdatere varighet");
+    }
+  };
+
+  /**
+   * Re-generate a thumbnail for an existing video by streaming it back from the server,
+   * grabbing a frame and POSTing it. Useful for items uploaded before the thumbnail
+   * extractor was wired up, or where extraction failed silently.
+   */
+  const regenerateThumb = async (item) => {
+    if (item.media_type !== "video") return;
+    const tid = toast.loading(`Lager forhåndsvisning for ${item.filename}...`);
+    try {
+      const r = await fetch(`${API}/videos/${item.id}/stream`);
+      const blob = await r.blob();
+      const file = new File([blob], item.filename || "video.mp4", {
+        type: item.content_type || "video/mp4",
+      });
+      const thumb = await captureThumbnail(file);
+      if (!thumb) throw new Error("Klarte ikke hente frame");
+      const fd = new FormData();
+      fd.append("file", thumb, "thumb.jpg");
+      await api.post(`/videos/${item.id}/thumbnail`, fd, {
+        headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
+      });
+      toast.success("Forhåndsvisning oppdatert", { id: tid });
+      await load();
+    } catch (e) {
+      toast.error("Kunne ikke lage forhåndsvisning", { id: tid });
     }
   };
 
@@ -293,6 +411,17 @@ export default function Upload() {
                         />
                         <span className="text-zinc-600 font-mono">sek</span>
                       </div>
+                    )}
+
+                    {!isImg && !v.has_thumbnail && (
+                      <button
+                        onClick={() => regenerateThumb(v)}
+                        data-testid="upload-regenerate-thumb-button"
+                        className="text-[10px] uppercase tracking-[0.15em] text-zinc-500 hover:text-[#F59E0B] px-2 py-1 border border-white/10 hover:border-[#F59E0B]/40 rounded transition-colors"
+                        title="Trekk ut et stillbilde fra videoen"
+                      >
+                        Lag preview
+                      </button>
                     )}
 
                     <button
