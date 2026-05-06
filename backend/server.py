@@ -6,6 +6,8 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
@@ -250,6 +252,105 @@ async def upload_video(
 
 class DurationUpdate(BaseModel):
     duration: float
+
+
+class TrimRequest(BaseModel):
+    start: float
+    end: float
+
+
+@api_router.post("/videos/{video_id}/trim", response_model=VideoOut)
+async def trim_video(video_id: str, payload: TrimRequest, _: bool = Depends(require_auth)):
+    record = await db.videos.find_one({"id": video_id, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="Video ikke funnet")
+    if record.get("media_type") != "video":
+        raise HTTPException(status_code=400, detail="Bare videoklipp kan trimmes")
+
+    start = max(0.0, float(payload.start))
+    end = max(start + 0.1, float(payload.end))
+    duration = end - start
+    if duration < 0.1 or duration > 7200:
+        raise HTTPException(status_code=400, detail="Ugyldig trim-område")
+
+    src_path = record["storage_path"]
+    src_ext = src_path.rsplit(".", 1)[-1] if "." in src_path else "mp4"
+
+    src_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f".{src_ext}")
+    dst_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    src_tmp.close()
+    dst_tmp.close()
+
+    try:
+        # 1. Download source from storage
+        def download():
+            resp = open_object_stream(src_path)
+            try:
+                with open(src_tmp.name, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=64 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+        await asyncio.to_thread(download)
+
+        # 2. Run ffmpeg with precise re-encode
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", f"{start:.3f}",
+            "-i", src_tmp.name,
+            "-t", f"{duration:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            dst_tmp.name,
+        ]
+        proc = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, timeout=900
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", errors="ignore")[:500]
+            logger.error(f"ffmpeg trim failed: {err}")
+            raise HTTPException(status_code=500, detail="Trimming feilet")
+
+        new_size = os.path.getsize(dst_tmp.name)
+        if new_size <= 0:
+            raise HTTPException(status_code=500, detail="Trimming gav tom fil")
+
+        # 3. Upload trimmed file back (replacing original at same logical path)
+        new_storage_path = src_path
+        if not src_path.endswith(".mp4"):
+            new_storage_path = src_path.rsplit(".", 1)[0] + ".mp4"
+
+        def upload_new():
+            with open(dst_tmp.name, "rb") as nf:
+                return put_object_stream(new_storage_path, nf, "video/mp4", new_size)
+
+        result = await asyncio.to_thread(upload_new)
+
+        # 4. Update DB
+        update = {
+            "storage_path": result["path"],
+            "content_type": "video/mp4",
+            "size": result.get("size", new_size),
+        }
+        await db.videos.update_one({"id": video_id}, {"$set": update})
+        record.update(update)
+        record["has_thumbnail"] = bool(record.get("thumbnail_path"))
+        record.setdefault("media_type", "video")
+        record.setdefault("duration", 5.0)
+        return VideoOut(**record)
+
+    finally:
+        for p in (src_tmp.name, dst_tmp.name):
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 @api_router.patch("/videos/{video_id}/duration")

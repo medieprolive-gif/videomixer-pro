@@ -1,8 +1,282 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, UploadCloud, Trash2, Film, Image as ImageIcon, LogOut, Clock } from "lucide-react";
+import { ArrowLeft, UploadCloud, Trash2, Film, Image as ImageIcon, LogOut, Clock, Scissors, X } from "lucide-react";
 import { toast } from "sonner";
-import { api, authHeaders, API, clearToken, thumbUrl } from "../lib/api";
+import { api, authHeaders, API, clearToken, thumbUrl, streamUrl } from "../lib/api";
+
+function formatTimecode(s) {
+  if (s == null || isNaN(s)) return "00:00.0";
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  const tenth = Math.floor((s % 1) * 10);
+  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${tenth}`;
+}
+
+/**
+ * Trim modal — lets user pick a [start, end] range, preview the result,
+ * and POST to /api/videos/{id}/trim. The backend re-encodes via FFmpeg.
+ */
+function TrimModal({ video, onClose, onSaved }) {
+  const videoRef = useRef(null);
+  const [duration, setDuration] = useState(0);
+  const [start, setStart] = useState(0);
+  const [end, setEnd] = useState(0);
+  const [time, setTime] = useState(0);
+  const [previewing, setPreviewing] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !video) return;
+    v.src = streamUrl(video.id);
+    v.load();
+    const onMeta = () => {
+      const d = v.duration || 0;
+      setDuration(d);
+      setStart(0);
+      setEnd(d);
+    };
+    const onTime = () => setTime(v.currentTime || 0);
+    v.addEventListener("loadedmetadata", onMeta);
+    v.addEventListener("timeupdate", onTime);
+    return () => {
+      v.removeEventListener("loadedmetadata", onMeta);
+      v.removeEventListener("timeupdate", onTime);
+    };
+  }, [video]);
+
+  // Preview: play from start to end, pause at end
+  useEffect(() => {
+    if (!previewing) return;
+    const v = videoRef.current;
+    if (!v) return;
+    const onTime = () => {
+      if (v.currentTime >= end - 0.05) {
+        v.pause();
+        setPreviewing(false);
+      }
+    };
+    v.addEventListener("timeupdate", onTime);
+    return () => v.removeEventListener("timeupdate", onTime);
+  }, [previewing, end]);
+
+  const startPreview = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = start;
+    v.play().catch(() => {});
+    setPreviewing(true);
+  };
+
+  // ESC closes
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const trimmedLength = Math.max(0, end - start);
+
+  const save = async () => {
+    if (trimmedLength < 0.1) {
+      toast.error("Området er for kort");
+      return;
+    }
+    setSaving(true);
+    const tid = toast.loading("Trimmer videoen...");
+    try {
+      await api.post(
+        `/videos/${video.id}/trim`,
+        { start, end },
+        { timeout: 600000 }
+      );
+      toast.success("Klippet er trimmet", { id: tid });
+      onSaved();
+      onClose();
+    } catch (e) {
+      const msg = e?.response?.data?.detail || "Trimming feilet";
+      toast.error(msg, { id: tid });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Visual: a single timeline strip with two draggable thumbs.
+  const trimPct = duration > 0 ? ((time - 0) / duration) * 100 : 0;
+  const startPct = duration > 0 ? (start / duration) * 100 : 0;
+  const endPct = duration > 0 ? (end / duration) * 100 : 100;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+      data-testid="trim-modal"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-[#0A0A0A] border border-white/10 rounded-lg w-full max-w-3xl flex flex-col max-h-[92vh]">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <Scissors className="w-4 h-4 text-[#F59E0B]" />
+            <h3 className="font-heading text-base text-white truncate max-w-md">
+              Trim · {video.filename}
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            data-testid="trim-close-button"
+            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/5 text-zinc-400 hover:text-white"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-5 overflow-y-auto">
+          <video
+            ref={videoRef}
+            controls
+            className="w-full bg-black rounded border border-white/10 max-h-[55vh]"
+            data-testid="trim-video"
+          />
+
+          {/* Timeline visualization */}
+          <div className="space-y-2">
+            <div className="relative h-9 rounded bg-black/60 border border-white/10 overflow-hidden">
+              {/* Selected (kept) range */}
+              <div
+                className="absolute top-0 bottom-0 bg-[#F59E0B]/15 border-x border-[#F59E0B]/50"
+                style={{ left: `${startPct}%`, width: `${Math.max(0, endPct - startPct)}%` }}
+              />
+              {/* Removed pre-range */}
+              <div
+                className="absolute top-0 bottom-0 bg-red-500/15"
+                style={{ left: 0, width: `${startPct}%` }}
+              />
+              {/* Removed post-range */}
+              <div
+                className="absolute top-0 bottom-0 bg-red-500/15"
+                style={{ left: `${endPct}%`, right: 0 }}
+              />
+              {/* Playhead */}
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none"
+                style={{ left: `${trimPct}%` }}
+              />
+              {/* Labels */}
+              <div className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] uppercase tracking-[0.25em] font-mono text-red-400/80">
+                fjern
+              </div>
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] uppercase tracking-[0.25em] font-mono text-red-400/80">
+                fjern
+              </div>
+              <div
+                className="absolute top-1/2 -translate-y-1/2 text-[9px] uppercase tracking-[0.25em] font-mono text-[#F59E0B] font-semibold"
+                style={{ left: `calc(${(startPct + endPct) / 2}% - 18px)` }}
+              >
+                behold
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-1">
+                  Start
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || 0}
+                  step={0.05}
+                  value={start}
+                  onChange={(e) => {
+                    const s = Math.min(parseFloat(e.target.value), end - 0.1);
+                    setStart(Math.max(0, s));
+                    const v = videoRef.current;
+                    if (v) v.currentTime = s;
+                  }}
+                  data-testid="trim-start-slider"
+                  className="w-full accent-[#F59E0B] h-1 bg-white/10 rounded-full"
+                />
+                <div
+                  className="font-mono text-xs text-[#F59E0B] mt-1"
+                  data-testid="trim-start-value"
+                >
+                  {formatTimecode(start)}
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-1">
+                  Slutt
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || 0}
+                  step={0.05}
+                  value={end}
+                  onChange={(e) => {
+                    const en = Math.max(parseFloat(e.target.value), start + 0.1);
+                    setEnd(Math.min(duration || 0, en));
+                    const v = videoRef.current;
+                    if (v) v.currentTime = en;
+                  }}
+                  data-testid="trim-end-slider"
+                  className="w-full accent-[#F59E0B] h-1 bg-white/10 rounded-full"
+                />
+                <div
+                  className="font-mono text-xs text-[#F59E0B] mt-1 text-right"
+                  data-testid="trim-end-value"
+                >
+                  {formatTimecode(end)}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-mono pt-1">
+              <span>Original: {formatTimecode(duration)}</span>
+              <span>
+                Resultat:{" "}
+                <span className="text-[#F59E0B]" data-testid="trim-result-length">
+                  {formatTimecode(trimmedLength)}
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between px-5 py-3 border-t border-white/10 gap-2">
+          <button
+            onClick={startPreview}
+            disabled={duration === 0 || trimmedLength < 0.1}
+            data-testid="trim-preview-button"
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-300 hover:text-white px-4 py-2 border border-white/10 hover:border-white/30 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {previewing ? "Spiller av..." : "Forhåndsvis"}
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              data-testid="trim-cancel-button"
+              className="text-xs uppercase tracking-[0.15em] text-zinc-500 hover:text-white px-4 py-2 transition-colors"
+            >
+              Avbryt
+            </button>
+            <button
+              onClick={save}
+              disabled={saving || trimmedLength < 0.1}
+              data-testid="trim-save-button"
+              className="inline-flex items-center gap-2 bg-[#F59E0B] hover:bg-[#FBBF24] text-black font-medium text-sm px-5 py-2 rounded-md transition-colors disabled:opacity-50"
+            >
+              {saving ? "Trimmer..." : "Lagre trim"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatSize(bytes) {
   if (!bytes) return "0 B";
@@ -112,6 +386,7 @@ export default function Upload() {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentName, setCurrentName] = useState("");
+  const [trimming, setTrimming] = useState(null);
   const inputRef = useRef(null);
   const navigate = useNavigate();
 
@@ -424,6 +699,18 @@ export default function Upload() {
                       </button>
                     )}
 
+                    {!isImg && (
+                      <button
+                        onClick={() => setTrimming(v)}
+                        data-testid="upload-trim-button"
+                        className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.15em] text-zinc-400 hover:text-[#F59E0B] px-2 py-1 border border-white/10 hover:border-[#F59E0B]/40 rounded transition-colors"
+                        title="Trim klippet"
+                      >
+                        <Scissors className="w-3 h-3" />
+                        Trim
+                      </button>
+                    )}
+
                     <button
                       onClick={() => remove(v.id)}
                       data-testid="upload-delete-button"
@@ -450,6 +737,14 @@ export default function Upload() {
           </a>
         )}
       </main>
+
+      {trimming && (
+        <TrimModal
+          video={trimming}
+          onClose={() => setTrimming(null)}
+          onSaved={load}
+        />
+      )}
     </div>
   );
 }
