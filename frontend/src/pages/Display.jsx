@@ -347,42 +347,121 @@ export default function Display() {
       className={`w-screen h-screen bg-black overflow-hidden flex items-center justify-center m-0 p-0 ${
         showCursor || showKioskOverlay ? "" : "cursor-none"
       }`}
+      style={{ fontFamily: "Helvetica, Arial, sans-serif" }}
     >
-      <video
-        ref={videoRef}
-        data-testid="display-video"
-        className={`w-full h-full object-contain bg-black ${isVideo ? "" : "hidden"}`}
-        playsInline
-        autoPlay
-      />
-
-      {isImage && pgm && (
-        <img
-          data-testid="display-image"
-          src={thumbUrl(pgm.id)}
-          alt={pgm.filename || ""}
-          className="w-full h-full object-contain bg-black"
+      {/* 16:9 stage — letterboxes/pillarboxes on non-16:9 viewports so the
+          program output is always rendered at the broadcast aspect ratio. */}
+      <div
+        data-testid="display-stage"
+        className="relative bg-black overflow-hidden"
+        style={{
+          width: "min(100vw, calc(100vh * 16 / 9))",
+          height: "min(100vh, calc(100vw * 9 / 16))",
+        }}
+      >
+        <video
+          ref={videoRef}
+          data-testid="display-video"
+          className={`w-full h-full object-contain bg-black ${isVideo ? "" : "hidden"}`}
+          playsInline
+          autoPlay
         />
-      )}
 
-      {idle && !showKioskOverlay && !showProgramOverview && (
-        <div className="text-center" data-testid="display-idle">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border border-white/10 mb-6 animate-pulse">
-            <Film className="w-8 h-8 text-[#F59E0B]" strokeWidth={1.5} />
-          </div>
-          <div className="font-heading text-3xl font-semibold tracking-tight text-white mb-2">
-            KinoKontroll
-          </div>
-          <div className="text-xs uppercase tracking-[0.3em] text-zinc-600">
-            Venter på avspilling
-          </div>
-          <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
-            Sal · {roomId}
-          </div>
-        </div>
-      )}
+        {isImage && pgm && (
+          <img
+            data-testid="display-image"
+            src={thumbUrl(pgm.id)}
+            alt={pgm.filename || ""}
+            className="w-full h-full object-contain bg-black"
+          />
+        )}
 
-      {/* Kiosk start overlay */}
+        {idle && !showKioskOverlay && !showProgramOverview && (
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center text-center"
+            data-testid="display-idle"
+          >
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border border-white/10 mb-6 animate-pulse">
+              <Film className="w-8 h-8 text-[#F59E0B]" strokeWidth={1.5} />
+            </div>
+            <div className="text-3xl font-semibold tracking-tight text-white mb-2">
+              KinoKontroll
+            </div>
+            <div className="text-xs uppercase tracking-[0.3em] text-zinc-600">
+              Venter på avspilling
+            </div>
+            <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
+              Sal · {roomId}
+            </div>
+          </div>
+        )}
+
+        {/* "Neste opp"-overlay (siste 10 sek av PGM) */}
+        {showNextUp && (
+          <div
+            data-testid="display-next-up-overlay"
+            className="absolute bottom-[6%] left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-black/75 backdrop-blur-sm border border-[#F59E0B]/40 px-6 py-3 rounded-md shadow-2xl animate-pulse"
+            style={{ animation: "kk-fade-in 0.4s ease-out" }}
+          >
+            <div className="text-[10px] uppercase tracking-[0.3em] text-[#F59E0B] font-mono font-semibold">
+              Neste opp
+            </div>
+            <div className="text-white text-lg max-w-2xl truncate">
+              {state.next_up_text}
+            </div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 ml-2">
+              {Math.ceil(remaining)}s
+            </div>
+          </div>
+        )}
+
+        {/* Program overview (full 16:9, between items / idle) */}
+        {showProgramOverview && (
+          <ProgramOverview
+            settings={settings}
+            schedule={schedule}
+            media={media}
+            roomId={roomId}
+          />
+        )}
+
+        {/* Neste innslag (fra spillelisten) – vises kontinuerlig nederst */}
+        {showScheduleTicker && !showProgramOverview && (
+          <div
+            data-testid="display-schedule-ticker"
+            className="absolute bottom-[3%] left-[2%] z-20 flex items-center gap-3 bg-black/55 backdrop-blur-md border border-white/10 px-4 py-2 rounded-md shadow-xl"
+            style={{ animation: "kk-fade-in 0.5s ease-out" }}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B] animate-pulse" />
+            <span className="text-[10px] uppercase tracking-[0.3em] text-[#F59E0B] font-mono font-semibold">
+              Neste
+            </span>
+            <span className="font-mono text-sm text-white tracking-wider">
+              {nextScheduledLabel.time}
+            </span>
+            <span className="text-zinc-600">·</span>
+            <span className="text-white text-sm max-w-[40ch] truncate">
+              {nextScheduledLabel.title}
+            </span>
+            <span className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500">
+              {nextScheduledLabel.rel}
+            </span>
+          </div>
+        )}
+
+        {/* KIOSK indicator (top-right, fades with cursor) */}
+        {fs && showCursor && (
+          <div
+            className="absolute top-[2%] right-[2%] z-40 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-zinc-500 font-mono bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-md border border-white/10"
+            data-testid="display-fs-badge"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B] animate-pulse" />
+            KIOSK · {roomId}
+          </div>
+        )}
+      </div>
+
+      {/* Kiosk start overlay (covers entire viewport including letterbox bars) */}
       {showKioskOverlay && (
         <button
           type="button"
@@ -393,7 +472,7 @@ export default function Display() {
           <div className="inline-flex items-center justify-center w-24 h-24 rounded-full border border-[#F59E0B]/40 bg-[#F59E0B]/5 mb-8 group-hover:bg-[#F59E0B]/10 transition-colors">
             <Maximize2 className="w-9 h-9 text-[#F59E0B]" strokeWidth={1.5} />
           </div>
-          <div className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight text-white mb-3">
+          <div className="text-3xl sm:text-4xl font-semibold tracking-tight text-white mb-3">
             Trykk for å starte kiosk
           </div>
           <div className="text-sm text-zinc-400 max-w-md px-6">
@@ -407,74 +486,13 @@ export default function Display() {
             </span>{" "}
             for å avslutte.
           </div>
+          <div className="mt-6 text-xs text-zinc-500 max-w-md px-6">
+            Tips: Skjermen vises i 16:9. Roter mobilen horisontalt for full visning.
+          </div>
           <div className="mt-10 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
             Sal · {roomId}
           </div>
         </button>
-      )}
-
-      {/* "Neste opp"-overlay (siste 10 sek av PGM) */}
-      {showNextUp && (
-        <div
-          data-testid="display-next-up-overlay"
-          className="absolute bottom-10 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-black/75 backdrop-blur-sm border border-[#F59E0B]/40 px-6 py-3 rounded-md shadow-2xl animate-pulse"
-          style={{ animation: "kk-fade-in 0.4s ease-out" }}
-        >
-          <div className="text-[10px] uppercase tracking-[0.3em] text-[#F59E0B] font-mono font-semibold">
-            Neste opp
-          </div>
-          <div className="text-white font-heading text-lg max-w-2xl truncate">
-            {state.next_up_text}
-          </div>
-          <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 ml-2">
-            {Math.ceil(remaining)}s
-          </div>
-        </div>
-      )}
-
-      {/* Program overview (full-screen, between items / idle) */}
-      {showProgramOverview && (
-        <ProgramOverview
-          settings={settings}
-          schedule={schedule}
-          media={media}
-          roomId={roomId}
-        />
-      )}
-
-      {/* Neste innslag (fra spillelisten) – vises kontinuerlig nederst */}
-      {showScheduleTicker && !showProgramOverview && (
-        <div
-          data-testid="display-schedule-ticker"
-          className="absolute bottom-4 left-4 z-20 flex items-center gap-3 bg-black/55 backdrop-blur-md border border-white/10 px-4 py-2 rounded-md shadow-xl"
-          style={{ animation: "kk-fade-in 0.5s ease-out" }}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B] animate-pulse" />
-          <span className="text-[10px] uppercase tracking-[0.3em] text-[#F59E0B] font-mono font-semibold">
-            Neste
-          </span>
-          <span className="font-mono text-sm text-white tracking-wider">
-            {nextScheduledLabel.time}
-          </span>
-          <span className="text-zinc-600">·</span>
-          <span className="text-white font-heading text-sm max-w-[40ch] truncate">
-            {nextScheduledLabel.title}
-          </span>
-          <span className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500">
-            {nextScheduledLabel.rel}
-          </span>
-        </div>
-      )}
-
-      {/* KIOSK indicator (top-right, fades with cursor) */}
-      {fs && showCursor && (
-        <div
-          className="absolute top-4 right-4 z-40 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-zinc-500 font-mono bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-md border border-white/10"
-          data-testid="display-fs-badge"
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B] animate-pulse" />
-          KIOSK · {roomId}
-        </div>
       )}
     </div>
   );

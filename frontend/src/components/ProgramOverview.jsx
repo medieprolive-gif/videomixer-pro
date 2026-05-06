@@ -34,14 +34,10 @@ function formatNorwegianDate(d) {
   return `${wd.charAt(0).toUpperCase()}${wd.slice(1)} ${d.getDate()}. ${MONTHS_NB[d.getMonth()]}`;
 }
 
-/** Resolve a media URL: images use the streaming endpoint (full-res, not thumbnail). */
-function mediaSrc(id) {
-  return id ? streamUrl(id) : null;
-}
-
 /**
  * Full-screen program overview shown between scheduled items (and while idle)
- * when enabled in room settings.
+ * when enabled in room settings. Content is sized in cqh/cqw (container query
+ * units) so the same layout works at any viewport/screen size.
  */
 export default function ProgramOverview({ settings, schedule, media, roomId }) {
   const [now, setNow] = useState(new Date());
@@ -59,93 +55,132 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
     const ts = now.getTime();
     return (schedule || [])
       .filter((s) => s.status === "scheduled" && new Date(s.scheduled_at).getTime() > ts)
-      .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at))
-      .slice(0, 5);
+      .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
   }, [schedule, now]);
+
+  // Date shown in the header follows the NEXT upcoming item's date, so that a
+  // late-evening display automatically rolls over to tomorrow once today's
+  // program is done. Falls back to current date when the schedule is empty.
+  const headerDate = useMemo(() => {
+    if (upcoming.length > 0) return new Date(upcoming[0].scheduled_at);
+    return now;
+  }, [upcoming, now]);
+
+  // Only show items that fall on the same calendar day as the header date —
+  // mixing today + tomorrow in one list reads as out-of-order to viewers.
+  const visibleItems = useMemo(() => {
+    const y = headerDate.getFullYear();
+    const m = headerDate.getMonth();
+    const d = headerDate.getDate();
+    return upcoming
+      .filter((s) => {
+        const dt = new Date(s.scheduled_at);
+        return dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d;
+      })
+      .slice(0, 3);
+  }, [upcoming, headerDate]);
 
   return (
     <div
       data-testid="display-program-overview"
       className="absolute inset-0 z-10 overflow-hidden"
       style={{
+        fontFamily: "Helvetica, Arial, sans-serif",
+        color: textColor,
         backgroundColor: "#000",
-        backgroundImage: bgId ? `url(${mediaSrc(bgId)})` : undefined,
+        backgroundImage: bgId ? `url(${streamUrl(bgId)})` : undefined,
         backgroundSize: "cover",
         backgroundPosition: "center",
+        containerType: "size",
       }}
     >
-      {/* Subtle dark veil over background for legibility */}
+      {/* Dark veil for legibility over arbitrary background images */}
       <div
-        className="absolute inset-0"
+        className="absolute inset-0 pointer-events-none"
         style={{
           background:
-            "linear-gradient(180deg, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.35) 40%, rgba(0,0,0,0.65) 100%)",
+            "linear-gradient(180deg, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.35) 40%, rgba(0,0,0,0.7) 100%)",
         }}
       />
 
-      <div
-        className="relative h-full w-full flex flex-col"
-        style={{ color: textColor }}
-      >
+      <div className="relative h-full w-full flex flex-col">
         {/* TOP BAR: logo (left) · date (center) · clock (right) */}
-        <div className="flex items-center justify-between px-12 pt-10">
+        <div
+          className="flex items-center justify-between"
+          style={{ padding: "4cqh 4cqw 0 4cqw" }}
+        >
           <div
-            className="flex items-center min-h-[80px] min-w-[140px]"
+            className="flex items-center"
+            style={{ width: "26cqw", minHeight: "10cqh" }}
             data-testid="program-overview-logo"
           >
             {logoId ? (
               <img
                 src={thumbUrl(logoId)}
                 alt="Logo"
-                className="max-h-[120px] max-w-[280px] object-contain drop-shadow-2xl"
+                className="object-contain drop-shadow-2xl"
+                style={{ maxHeight: "14cqh", maxWidth: "100%" }}
               />
             ) : null}
           </div>
           <div
-            className="text-center font-heading font-semibold tracking-tight drop-shadow-2xl"
-            style={{ fontSize: "clamp(2rem, 3.4vw, 3.75rem)" }}
+            className="text-center font-bold tracking-tight drop-shadow-2xl"
+            style={{ fontSize: "5.2cqh", letterSpacing: "-0.02em" }}
             data-testid="program-overview-date"
           >
-            {formatNorwegianDate(now)}
+            {formatNorwegianDate(headerDate)}
           </div>
           <div
-            className="text-right font-mono font-bold tabular-nums tracking-wider drop-shadow-2xl"
-            style={{ fontSize: "clamp(2.5rem, 4.4vw, 4.75rem)" }}
+            className="text-right font-bold tabular-nums tracking-wider drop-shadow-2xl"
+            style={{
+              width: "26cqw",
+              fontSize: "7cqh",
+              letterSpacing: "0.02em",
+            }}
             data-testid="program-overview-clock"
           >
             {pad(now.getHours())}:{pad(now.getMinutes())}
           </div>
         </div>
 
-        {/* Heading */}
-        <div className="px-12 mt-12">
+        {/* Section label */}
+        <div style={{ padding: "4cqh 5cqw 0 5cqw" }}>
           <div
-            className="font-heading font-light tracking-[0.2em] uppercase opacity-80"
-            style={{ fontSize: "clamp(0.9rem, 1.1vw, 1.4rem)" }}
+            className="font-light uppercase opacity-75"
+            style={{ fontSize: "1.8cqh", letterSpacing: "0.35em" }}
           >
             Programoversikt
           </div>
           <div
-            className="mt-1 h-[2px] w-24"
-            style={{ backgroundColor: textColor, opacity: 0.5 }}
+            style={{
+              marginTop: "0.8cqh",
+              height: "2px",
+              width: "8cqw",
+              backgroundColor: textColor,
+              opacity: 0.5,
+            }}
           />
         </div>
 
-        {/* Upcoming items list */}
+        {/* Upcoming items list (3 items) */}
         <div
-          className="flex-1 px-12 pt-8 pb-12 flex items-center justify-center"
+          className="flex-1 flex items-center justify-center"
+          style={{ padding: "2cqh 5cqw 4cqh 5cqw" }}
           data-testid="program-overview-list"
         >
-          {upcoming.length === 0 ? (
+          {visibleItems.length === 0 ? (
             <div
-              className="opacity-60 font-heading"
-              style={{ fontSize: "clamp(1.5rem, 2.2vw, 2.5rem)" }}
+              className="opacity-60 font-light"
+              style={{ fontSize: "4cqh" }}
             >
-              Ingen flere planlagte innslag i dag
+              Ingen flere planlagte innslag
             </div>
           ) : (
-            <ul className="w-full max-w-[1400px] mx-auto space-y-5">
-              {upcoming.map((s) => {
+            <ul
+              className="w-full"
+              style={{ maxWidth: "90cqw", display: "flex", flexDirection: "column", gap: "2cqh" }}
+            >
+              {visibleItems.map((s) => {
                 const m = (media || []).find((x) => x.id === s.media_id);
                 const dt = new Date(s.scheduled_at);
                 const time = `${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
@@ -154,18 +189,27 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
                   <li
                     key={s.id}
                     data-testid="program-overview-item"
-                    className="flex items-baseline gap-10 border-b py-4"
-                    style={{ borderColor: `${textColor}33` }}
+                    className="flex items-baseline"
+                    style={{
+                      gap: "6cqw",
+                      paddingBottom: "2cqh",
+                      borderBottom: `1px solid ${textColor}33`,
+                    }}
                   >
                     <span
-                      className="font-mono font-bold tabular-nums tracking-wider shrink-0"
-                      style={{ fontSize: "clamp(2rem, 3.6vw, 4rem)", minWidth: "5em" }}
+                      className="font-bold tabular-nums"
+                      style={{
+                        fontSize: "10cqh",
+                        letterSpacing: "0.02em",
+                        minWidth: "20cqw",
+                        flexShrink: 0,
+                      }}
                     >
                       {time}
                     </span>
                     <span
-                      className="font-heading font-medium tracking-tight truncate"
-                      style={{ fontSize: "clamp(1.6rem, 2.6vw, 3rem)" }}
+                      className="font-medium tracking-tight truncate"
+                      style={{ fontSize: "7cqh", letterSpacing: "-0.015em", minWidth: 0, flex: 1 }}
                     >
                       {title}
                     </span>
@@ -176,10 +220,15 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
           )}
         </div>
 
-        {/* Bottom-right room indicator (subtle) */}
+        {/* Bottom-right room indicator */}
         <div
-          className="absolute bottom-6 right-8 font-mono uppercase tracking-[0.3em] opacity-50"
-          style={{ fontSize: "clamp(0.7rem, 0.8vw, 1rem)" }}
+          className="absolute uppercase opacity-50"
+          style={{
+            bottom: "2cqh",
+            right: "3cqw",
+            fontSize: "1.4cqh",
+            letterSpacing: "0.3em",
+          }}
         >
           Sal · {roomId}
         </div>
