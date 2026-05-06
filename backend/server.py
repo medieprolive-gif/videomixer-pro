@@ -167,6 +167,26 @@ async def scheduler_loop():
             logger.exception("scheduler tick failed")
 
 
+async def _expire_bumper(room: str, bumper_id: str, sleep_for: float):
+    """Clear PGM after the bumper has run, so the Display can fall back to
+    program overview / idle until the next scheduled item starts."""
+    try:
+        await asyncio.sleep(max(0.5, float(sleep_for)))
+    except asyncio.CancelledError:
+        raise
+    try:
+        state = await get_state_doc(room)
+        # Only clear if state still shows our bumper (user may have overridden).
+        if state.get("pgm_id") == bumper_id:
+            state["pgm_id"] = None
+            state["is_playing"] = False
+            state["current_time"] = 0
+            await save_state(state, room)
+            await broadcast_state(state, room)
+    except Exception:
+        logger.exception("expire bumper failed")
+
+
 # ---------- App ----------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -740,31 +760,59 @@ async def get_rooms():
     return {"rooms": await list_rooms()}
 
 
-# ---------- Room settings (global bumper) ----------
+# ---------- Room settings (global bumper + program overview) ----------
 class RoomSettingsModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
     room: str
     global_bumper_id: Optional[str] = None
     global_bumper_duration: float = 5.0
+    program_overview_enabled: bool = False
+    program_overview_logo_id: Optional[str] = None
+    program_overview_background_id: Optional[str] = None
+    program_overview_text_color: str = "#FFFFFF"
+    program_overview_duration: float = 8.0
+
+
+def _settings_doc_from_payload(room: str, payload: RoomSettingsModel) -> Dict[str, Any]:
+    return {
+        "room": room,
+        "global_bumper_id": payload.global_bumper_id,
+        "global_bumper_duration": float(payload.global_bumper_duration or 5.0),
+        "program_overview_enabled": bool(payload.program_overview_enabled),
+        "program_overview_logo_id": payload.program_overview_logo_id,
+        "program_overview_background_id": payload.program_overview_background_id,
+        "program_overview_text_color": payload.program_overview_text_color or "#FFFFFF",
+        "program_overview_duration": float(payload.program_overview_duration or 8.0),
+    }
+
+
+def _settings_with_defaults(room: str, s: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    base = {
+        "room": room,
+        "global_bumper_id": None,
+        "global_bumper_duration": 5.0,
+        "program_overview_enabled": False,
+        "program_overview_logo_id": None,
+        "program_overview_background_id": None,
+        "program_overview_text_color": "#FFFFFF",
+        "program_overview_duration": 8.0,
+    }
+    if s:
+        base.update({k: v for k, v in s.items() if k in base})
+    return base
 
 
 @api_router.get("/rooms/{room}/settings", response_model=RoomSettingsModel)
 async def get_room_settings(room: str):
     room = _normalize_room(room)
     s = await db.room_settings.find_one({"room": room}, {"_id": 0})
-    if not s:
-        s = {"room": room, "global_bumper_id": None, "global_bumper_duration": 5.0}
-    return RoomSettingsModel(**s)
+    return RoomSettingsModel(**_settings_with_defaults(room, s))
 
 
 @api_router.put("/rooms/{room}/settings", response_model=RoomSettingsModel)
 async def set_room_settings(room: str, payload: RoomSettingsModel, _: bool = Depends(require_auth)):
     room = _normalize_room(room)
-    doc = {
-        "room": room,
-        "global_bumper_id": payload.global_bumper_id,
-        "global_bumper_duration": float(payload.global_bumper_duration or 5.0),
-    }
+    doc = _settings_doc_from_payload(room, payload)
     await db.room_settings.update_one({"room": room}, {"$set": doc}, upsert=True)
     return RoomSettingsModel(**doc)
 
@@ -1045,6 +1093,13 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
                             state["is_playing"] = True
                             state["current_time"] = 0
                             state["next_up_text"] = nxt.get("title") or ""
+                            # Schedule a transition out of the bumper after its
+                            # configured duration, so the program overview phase
+                            # (or idle) can take over until the next item starts.
+                            bumper_dur = float(rs.get("global_bumper_duration") or 5.0)
+                            asyncio.create_task(
+                                _expire_bumper(room, rs["global_bumper_id"], bumper_dur)
+                            )
 
             await save_state(state, room)
             await broadcast_state(state, room)

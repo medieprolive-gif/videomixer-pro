@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { Film, Maximize2 } from "lucide-react";
 import { useSync } from "../lib/useSync";
 import { api, streamUrl, thumbUrl } from "../lib/api";
+import ProgramOverview from "../components/ProgramOverview";
 
 function isFullscreen() {
   return Boolean(
@@ -52,6 +53,7 @@ export default function Display() {
 
   const [media, setMedia] = useState([]);
   const [schedule, setSchedule] = useState([]);
+  const [settings, setSettings] = useState(null);
   const [now, setNow] = useState(Date.now());
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -93,6 +95,22 @@ export default function Display() {
     const i = setInterval(loadSchedule, 15000);
     return () => clearInterval(i);
   }, [loadSchedule]);
+
+  // Load room settings (program overview config) – poll periodically so changes
+  // made in /playout reach the projector without a reload.
+  const loadSettings = useCallback(async () => {
+    try {
+      const r = await api.get(`/rooms/${roomId}/settings`);
+      setSettings(r.data || null);
+    } catch (_) {
+      /* noop */
+    }
+  }, [roomId]);
+  useEffect(() => {
+    loadSettings();
+    const i = setInterval(loadSettings, 20000);
+    return () => clearInterval(i);
+  }, [loadSettings]);
   useEffect(() => {
     const i = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(i);
@@ -307,7 +325,20 @@ export default function Display() {
   }, [nextScheduled, media, now]);
 
   // Show schedule ticker when idle OR not overlapping with "next up"-overlay
-  const showScheduleTicker = !!nextScheduledLabel && !showNextUp && !showKioskOverlay;
+  // Hidden when full program overview is up (it already shows next items).
+  const showScheduleTicker =
+    !!nextScheduledLabel && !showNextUp && !showKioskOverlay;
+
+  // Program overview: shown full-screen between scheduled items and while idle.
+  // Driven by user setting on /playout. Hides when:
+  //  - kiosk start overlay is up (initial fullscreen prompt)
+  //  - real media (video/image) is being shown (pgm_id is set and is_playing)
+  //  - the "Next up" overlay is up (so we don't double up text on screen)
+  const showProgramOverview =
+    !!settings?.program_overview_enabled &&
+    !showKioskOverlay &&
+    !showNextUp &&
+    idle;
 
   return (
     <div
@@ -334,7 +365,7 @@ export default function Display() {
         />
       )}
 
-      {idle && !showKioskOverlay && (
+      {idle && !showKioskOverlay && !showProgramOverview && (
         <div className="text-center" data-testid="display-idle">
           <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border border-white/10 mb-6 animate-pulse">
             <Film className="w-8 h-8 text-[#F59E0B]" strokeWidth={1.5} />
@@ -401,8 +432,18 @@ export default function Display() {
         </div>
       )}
 
+      {/* Program overview (full-screen, between items / idle) */}
+      {showProgramOverview && (
+        <ProgramOverview
+          settings={settings}
+          schedule={schedule}
+          media={media}
+          roomId={roomId}
+        />
+      )}
+
       {/* Neste innslag (fra spillelisten) – vises kontinuerlig nederst */}
-      {showScheduleTicker && (
+      {showScheduleTicker && !showProgramOverview && (
         <div
           data-testid="display-schedule-ticker"
           className="absolute bottom-4 left-4 z-20 flex items-center gap-3 bg-black/55 backdrop-blur-md border border-white/10 px-4 py-2 rounded-md shadow-xl"

@@ -16,6 +16,9 @@ import {
   ChevronLeft,
   ChevronRight,
   RotateCcw,
+  Upload as UploadIcon,
+  LayoutGrid,
+  Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, clearToken, thumbUrl } from "../lib/api";
@@ -493,13 +496,23 @@ export default function Playout() {
   const navigate = useNavigate();
   const [media, setMedia] = useState([]);
   const [items, setItems] = useState([]);
-  const [settings, setSettings] = useState({ global_bumper_id: null, global_bumper_duration: 5 });
+  const [settings, setSettings] = useState({
+    global_bumper_id: null,
+    global_bumper_duration: 5,
+    program_overview_enabled: false,
+    program_overview_logo_id: null,
+    program_overview_background_id: null,
+    program_overview_text_color: "#FFFFFF",
+    program_overview_duration: 8,
+  });
   const [now, setNow] = useState(new Date());
   const { state } = useSync(roomId);
 
   // Selected day and modal state
   const [date, setDate] = useState(ymd(new Date()));
   const [editing, setEditing] = useState(null); // null | { mode: "create"|"edit", item?, initialTime? }
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [uploadingBg, setUploadingBg] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -510,7 +523,7 @@ export default function Playout() {
       ]);
       setMedia(m.data || []);
       setItems(sched.data || []);
-      setSettings(st.data || { global_bumper_id: null, global_bumper_duration: 5 });
+      setSettings((prev) => ({ ...prev, ...(st.data || {}) }));
     } catch (_) {
       /* noop */
     }
@@ -538,10 +551,53 @@ export default function Playout() {
         room: roomId,
         global_bumper_id: settings.global_bumper_id || null,
         global_bumper_duration: parseFloat(settings.global_bumper_duration) || 5,
+        program_overview_enabled: !!settings.program_overview_enabled,
+        program_overview_logo_id: settings.program_overview_logo_id || null,
+        program_overview_background_id: settings.program_overview_background_id || null,
+        program_overview_text_color: settings.program_overview_text_color || "#FFFFFF",
+        program_overview_duration: parseFloat(settings.program_overview_duration) || 8,
       });
       toast.success("Innstillinger lagret");
     } catch (_) {
       toast.error("Kunne ikke lagre innstillinger");
+    }
+  };
+
+  /** Upload an image and persist its id under the given settings field. */
+  const uploadImageToSetting = async (file, settingKey, busySetter) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error("Bare bildefiler kan brukes her");
+      return;
+    }
+    busySetter(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await api.post("/videos/upload", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const newId = r.data?.id;
+      if (!newId) throw new Error("Manglet id i svar");
+      // Save the new setting immediately so it sticks even before user clicks "Lagre".
+      const next = { ...settings, [settingKey]: newId };
+      setSettings(next);
+      await api.put(`/rooms/${roomId}/settings`, {
+        room: roomId,
+        global_bumper_id: next.global_bumper_id || null,
+        global_bumper_duration: parseFloat(next.global_bumper_duration) || 5,
+        program_overview_enabled: !!next.program_overview_enabled,
+        program_overview_logo_id: next.program_overview_logo_id || null,
+        program_overview_background_id: next.program_overview_background_id || null,
+        program_overview_text_color: next.program_overview_text_color || "#FFFFFF",
+        program_overview_duration: parseFloat(next.program_overview_duration) || 8,
+      });
+      toast.success("Bilde lastet opp");
+      loadAll();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Opplasting feilet");
+    } finally {
+      busySetter(false);
     }
   };
 
@@ -686,6 +742,214 @@ export default function Playout() {
             <button
               onClick={saveSettings}
               data-testid="playout-bumper-save"
+              className="inline-flex items-center justify-center gap-2 bg-[#111111] border border-white/10 hover:border-[#F59E0B]/40 hover:bg-[#F59E0B]/5 text-zinc-300 hover:text-[#F59E0B] px-4 py-2 rounded-md text-sm transition-colors"
+            >
+              <Save className="w-3.5 h-3.5" /> Lagre
+            </button>
+          </div>
+        </section>
+
+        {/* Programoversikt */}
+        <section
+          className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4"
+          data-testid="playout-program-overview-section"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold flex items-center gap-2">
+              <LayoutGrid className="w-3 h-3" /> Programoversikt
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={!!settings.program_overview_enabled}
+                onChange={(e) =>
+                  setSettings({ ...settings, program_overview_enabled: e.target.checked })
+                }
+                data-testid="playout-overview-enabled"
+                className="accent-[#F59E0B]"
+              />
+              <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-400">
+                {settings.program_overview_enabled ? "Aktivert" : "Deaktivert"}
+              </span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Logo upload */}
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                Logo (øverst venstre)
+              </label>
+              <div className="flex items-center gap-3">
+                <div className="w-20 h-12 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                  {settings.program_overview_logo_id ? (
+                    <img
+                      src={thumbUrl(settings.program_overview_logo_id)}
+                      alt=""
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <ImageIcon className="w-4 h-4 text-zinc-600" />
+                  )}
+                </div>
+                <label
+                  className={`inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] px-3 py-2 border border-white/10 rounded-md cursor-pointer transition-colors ${
+                    uploadingLogo
+                      ? "text-zinc-600 border-white/5 cursor-wait"
+                      : "text-zinc-300 hover:text-[#F59E0B] hover:border-[#F59E0B]/40"
+                  }`}
+                  data-testid="playout-overview-logo-upload"
+                >
+                  {uploadingLogo ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <UploadIcon className="w-3.5 h-3.5" />
+                  )}
+                  Last opp logo
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingLogo}
+                    onChange={(e) =>
+                      uploadImageToSetting(
+                        e.target.files?.[0],
+                        "program_overview_logo_id",
+                        setUploadingLogo
+                      )
+                    }
+                  />
+                </label>
+                {settings.program_overview_logo_id && (
+                  <button
+                    onClick={() =>
+                      setSettings({ ...settings, program_overview_logo_id: null })
+                    }
+                    title="Fjern logo"
+                    data-testid="playout-overview-logo-clear"
+                    className="text-zinc-500 hover:text-red-400 p-1.5 rounded hover:bg-red-500/10"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Background upload */}
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                Bakgrunnsplakat
+              </label>
+              <div className="flex items-center gap-3">
+                <div className="w-20 h-12 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                  {settings.program_overview_background_id ? (
+                    <img
+                      src={thumbUrl(settings.program_overview_background_id)}
+                      alt=""
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <ImageIcon className="w-4 h-4 text-zinc-600" />
+                  )}
+                </div>
+                <label
+                  className={`inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] px-3 py-2 border border-white/10 rounded-md cursor-pointer transition-colors ${
+                    uploadingBg
+                      ? "text-zinc-600 border-white/5 cursor-wait"
+                      : "text-zinc-300 hover:text-[#F59E0B] hover:border-[#F59E0B]/40"
+                  }`}
+                  data-testid="playout-overview-bg-upload"
+                >
+                  {uploadingBg ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <UploadIcon className="w-3.5 h-3.5" />
+                  )}
+                  Last opp bakgrunn
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingBg}
+                    onChange={(e) =>
+                      uploadImageToSetting(
+                        e.target.files?.[0],
+                        "program_overview_background_id",
+                        setUploadingBg
+                      )
+                    }
+                  />
+                </label>
+                {settings.program_overview_background_id && (
+                  <button
+                    onClick={() =>
+                      setSettings({ ...settings, program_overview_background_id: null })
+                    }
+                    title="Fjern bakgrunn"
+                    data-testid="playout-overview-bg-clear"
+                    className="text-zinc-500 hover:text-red-400 p-1.5 rounded hover:bg-red-500/10"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Text color */}
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                Tekstfarge
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="color"
+                  value={settings.program_overview_text_color || "#FFFFFF"}
+                  onChange={(e) =>
+                    setSettings({ ...settings, program_overview_text_color: e.target.value })
+                  }
+                  data-testid="playout-overview-color"
+                  className="w-12 h-10 rounded border border-white/10 bg-[#050505] cursor-pointer"
+                />
+                <input
+                  type="text"
+                  value={settings.program_overview_text_color || "#FFFFFF"}
+                  onChange={(e) =>
+                    setSettings({ ...settings, program_overview_text_color: e.target.value })
+                  }
+                  placeholder="#FFFFFF"
+                  data-testid="playout-overview-color-text"
+                  className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono uppercase focus:outline-none focus:border-[#F59E0B]"
+                />
+              </div>
+            </div>
+
+            {/* Duration */}
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                Varighet mellom innslag (sek)
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={3600}
+                value={settings.program_overview_duration || 8}
+                onChange={(e) =>
+                  setSettings({ ...settings, program_overview_duration: e.target.value })
+                }
+                data-testid="playout-overview-duration"
+                className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-xs text-zinc-600 flex-1 min-w-[260px]">
+              Vises automatisk på <code className="text-zinc-400">/display</code> mellom innslag og når det ikke er noe avspilling.
+              Bumper (over) vises først hvis satt, deretter programoversikten.
+            </p>
+            <button
+              onClick={saveSettings}
+              data-testid="playout-overview-save"
               className="inline-flex items-center justify-center gap-2 bg-[#111111] border border-white/10 hover:border-[#F59E0B]/40 hover:bg-[#F59E0B]/5 text-zinc-300 hover:text-[#F59E0B] px-4 py-2 rounded-md text-sm transition-colors"
             >
               <Save className="w-3.5 h-3.5" /> Lagre
