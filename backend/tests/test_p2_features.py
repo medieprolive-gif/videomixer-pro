@@ -75,7 +75,7 @@ class TestRooms:
         assert r.status_code == 200
         s = r.json()
         assert s["id"] == "default"
-        for k in ["current_video_id", "is_playing", "current_time", "volume", "muted", "loop"]:
+        for k in ["pvw_id", "pgm_id", "is_playing", "current_time", "volume", "muted", "loop"]:
             assert k in s
 
     def test_state_named_room_separate(self):
@@ -196,40 +196,30 @@ class TestWebSocketP2:
             async with websockets.connect(ws_url(room), open_timeout=10) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=10)  # initial
 
-                # Select first clip (auth required)
-                await ws.send(json.dumps({"action": "select", "video_id": v_ids[0], "token": token}))
+                # Load first clip directly into PGM and start playing
+                await ws.send(json.dumps({"action": "set_pgm", "media_id": v_ids[0], "token": token}))
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                assert msg["state"]["current_video_id"] == v_ids[0]
+                assert msg["state"]["pgm_id"] == v_ids[0]
+                await ws.send(json.dumps({"action": "play", "token": token}))
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                assert msg["state"]["is_playing"] is True
 
-                # Send 'ended' WITHOUT a token — should still work and advance
-                await ws.send(json.dumps({"action": "ended", "video_id": v_ids[0]}))
+                # Send 'ended' WITHOUT a token — should still work and FREEZE (not advance)
+                await ws.send(json.dumps({"action": "ended", "media_id": v_ids[0]}))
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
                 assert msg["type"] == "state", f"Got: {msg}"
-                # Should have advanced to a next clip
-                next_id = msg["state"]["current_video_id"]
-                assert next_id is not None
-                assert next_id != v_ids[0], "ended did not advance to next clip"
-
-                # Now end the LAST clip — should stop (loop=False default)
-                await ws.send(json.dumps({"action": "ended", "video_id": next_id}))
-                # Drain until is_playing becomes False (next state msg)
-                got_stop = False
-                for _ in range(3):
-                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
-                    m = json.loads(raw)
-                    if m.get("type") == "state" and m["state"].get("is_playing") is False:
-                        got_stop = True
-                        break
-                assert got_stop, "expected playback to stop after ending last clip with loop=False"
+                # PGM should remain the same (no auto-advance)
+                assert msg["state"]["pgm_id"] == v_ids[0], "ended must not change PGM"
+                # is_playing must be False (frozen)
+                assert msg["state"]["is_playing"] is False, "ended must freeze playback"
         finally:
-            # cleanup uploaded clips
             for vid in v_ids:
                 await asyncio.to_thread(
                     requests.delete, f"{API}/videos/{vid}", headers=auth_headers
                 )
 
     async def test_ended_action_stale_id_ignored(self, token, auth_headers):
-        """'ended' with an id that doesn't match current_video_id must NOT advance."""
+        """'ended' with an id that doesn't match pgm_id must NOT change anything."""
         files = {"file": ("TEST_stale.mp4", _fake_video_bytes(1024), "video/mp4")}
         r = await asyncio.to_thread(
             requests.post, f"{API}/videos/upload", headers=auth_headers, files=files
@@ -241,16 +231,19 @@ class TestWebSocketP2:
         try:
             async with websockets.connect(ws_url(room), open_timeout=10) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=10)
-                # select
-                await ws.send(json.dumps({"action": "select", "video_id": vid, "token": token}))
+                # Load and play in PGM
+                await ws.send(json.dumps({"action": "set_pgm", "media_id": vid, "token": token}))
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                cur = msg["state"]["current_video_id"]
+                cur = msg["state"]["pgm_id"]
+                await ws.send(json.dumps({"action": "play", "token": token}))
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                assert msg["state"]["is_playing"] is True
 
-                # send ended with a fake id — must be ignored (no advance)
-                await ws.send(json.dumps({"action": "ended", "video_id": "fake-id-xyz"}))
-                # backend still saves+broadcasts state but unchanged current_video_id
+                # Send ended with a fake id — must be ignored (no freeze, no PGM change)
+                await ws.send(json.dumps({"action": "ended", "media_id": "fake-id-xyz"}))
                 msg2 = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                assert msg2["state"]["current_video_id"] == cur
+                assert msg2["state"]["pgm_id"] == cur
+                assert msg2["state"]["is_playing"] is True, "stale ended must not freeze"
         finally:
             await asyncio.to_thread(
                 requests.delete, f"{API}/videos/{vid}", headers=auth_headers

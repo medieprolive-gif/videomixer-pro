@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, UploadCloud, Trash2, Film, LogOut } from "lucide-react";
+import { ArrowLeft, UploadCloud, Trash2, Film, Image as ImageIcon, LogOut, Clock } from "lucide-react";
 import { toast } from "sonner";
-import { api, authHeaders, API, clearToken } from "../lib/api";
+import { api, authHeaders, API, clearToken, thumbUrl } from "../lib/api";
 
 function formatSize(bytes) {
   if (!bytes) return "0 B";
@@ -45,28 +45,32 @@ export default function Upload() {
     setProgress(0);
     setCurrentName(file.name);
     try {
+      const isImage = (file.type || "").startsWith("image/");
       const fd = new FormData();
       fd.append("file", file);
+      if (isImage) fd.append("duration", "5");
       const res = await api.post("/videos/upload", fd, {
         headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
         onUploadProgress: (ev) => {
           if (ev.total) setProgress(Math.round((ev.loaded / ev.total) * 100));
         },
       });
-      const videoId = res.data?.id;
+      const mediaId = res.data?.id;
 
-      // Best-effort thumbnail extraction in the browser
-      try {
-        const thumb = await captureThumbnail(file);
-        if (thumb && videoId) {
-          const tfd = new FormData();
-          tfd.append("file", thumb, "thumb.jpg");
-          await api.post(`/videos/${videoId}/thumbnail`, tfd, {
-            headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
-          });
+      // Best-effort video thumbnail extraction (skipped for images — backend already uses image as its own thumb)
+      if (!isImage) {
+        try {
+          const thumb = await captureThumbnail(file);
+          if (thumb && mediaId) {
+            const tfd = new FormData();
+            tfd.append("file", thumb, "thumb.jpg");
+            await api.post(`/videos/${mediaId}/thumbnail`, tfd, {
+              headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
+            });
+          }
+        } catch (_) {
+          /* thumbnail is best-effort */
         }
-      } catch (_) {
-        /* thumbnail is best-effort; ignore failures */
       }
 
       toast.success(`${file.name} lastet opp`);
@@ -99,10 +103,20 @@ export default function Upload() {
   const remove = async (id) => {
     try {
       await api.delete(`/videos/${id}`, { headers: authHeaders() });
-      toast.success("Video slettet");
+      toast.success("Slettet");
       setVideos((v) => v.filter((x) => x.id !== id));
     } catch (e) {
       toast.error("Sletting feilet");
+    }
+  };
+
+  const updateDuration = async (id, duration) => {
+    const safe = Math.max(1, Math.min(3600, parseFloat(duration) || 5));
+    try {
+      await api.patch(`/videos/${id}/duration`, { duration: safe });
+      setVideos((vs) => vs.map((v) => (v.id === id ? { ...v, duration: safe } : v)));
+    } catch (_) {
+      toast.error("Klarte ikke oppdatere varighet");
     }
   };
 
@@ -143,10 +157,10 @@ export default function Upload() {
       <main className="max-w-5xl mx-auto px-6 py-12">
         <div className="mb-10">
           <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight text-white mb-2">
-            Last inn videoklipp
+            Last inn medieklipp
           </h1>
           <p className="text-sm text-zinc-500">
-            Dra og slipp filer, eller klikk i sonen under. Støtter MP4, WEBM, MOV.
+            Dra og slipp filer, eller klikk i sonen under. Støtter MP4, WEBM, MOV samt JPG, PNG, WEBP, GIF.
           </p>
         </div>
 
@@ -171,7 +185,7 @@ export default function Upload() {
               <UploadCloud className="w-5 h-5 text-[#F59E0B]" strokeWidth={1.8} />
             </div>
             <div className="font-heading text-lg text-white mb-2">
-              {uploading ? "Laster opp..." : "Dra og slipp videofiler her"}
+              {uploading ? "Laster opp..." : "Dra og slipp video- eller bildefiler her"}
             </div>
             <div className="text-xs text-zinc-500">
               {uploading ? currentName : "eller klikk for å velge"}
@@ -193,7 +207,7 @@ export default function Upload() {
           <input
             ref={inputRef}
             type="file"
-            accept="video/*"
+            accept="video/*,image/*"
             multiple
             className="hidden"
             data-testid="upload-file-input"
@@ -214,44 +228,84 @@ export default function Upload() {
               className="text-sm text-zinc-600 bg-[#0A0A0A] border border-white/10 rounded-lg px-6 py-10 text-center"
               data-testid="upload-empty"
             >
-              Ingen videoer lastet opp enda.
+              Ingen klipp lastet opp enda.
             </div>
           ) : (
             <ul className="divide-y divide-white/5 bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden">
-              {videos.map((v) => (
-                <li
-                  key={v.id}
-                  data-testid="upload-clip-item"
-                  className="flex items-center gap-4 px-5 py-3 hover:bg-[#111111] transition-colors"
-                >
-                  <div className="w-16 h-10 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
-                    {v.has_thumbnail ? (
-                      <img
-                        src={thumbUrl(v.id)}
-                        alt=""
-                        className="w-full h-full object-cover"
-                        loading="lazy"
-                      />
-                    ) : (
-                      <Film className="w-4 h-4 text-[#F59E0B]" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-white text-sm truncate">{v.filename}</div>
-                    <div className="text-xs text-zinc-600 font-mono">
-                      {formatSize(v.size)} · {(v.content_type || "").replace("video/", "")}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => remove(v.id)}
-                    data-testid="upload-delete-button"
-                    className="inline-flex items-center gap-2 text-xs text-zinc-500 hover:text-red-400 px-3 py-1.5 border border-white/10 hover:border-red-500/40 rounded-md transition-colors"
+              {videos.map((v) => {
+                const isImg = v.media_type === "image";
+                return (
+                  <li
+                    key={v.id}
+                    data-testid="upload-clip-item"
+                    className="flex items-center gap-4 px-5 py-3 hover:bg-[#111111] transition-colors"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Slett
-                  </button>
-                </li>
-              ))}
+                    <div className="w-16 h-10 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                      {v.has_thumbnail ? (
+                        <img
+                          src={thumbUrl(v.id)}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                        />
+                      ) : isImg ? (
+                        <ImageIcon className="w-4 h-4 text-[#F59E0B]" />
+                      ) : (
+                        <Film className="w-4 h-4 text-[#F59E0B]" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white text-sm truncate">{v.filename}</span>
+                        <span
+                          className={`text-[9px] uppercase tracking-[0.15em] font-mono px-1.5 py-0.5 rounded border ${
+                            isImg
+                              ? "text-[#F59E0B] border-[#F59E0B]/40 bg-[#F59E0B]/5"
+                              : "text-zinc-500 border-white/10"
+                          }`}
+                        >
+                          {isImg ? "BILDE" : "VIDEO"}
+                        </span>
+                      </div>
+                      <div className="text-xs text-zinc-600 font-mono">
+                        {formatSize(v.size)} · {(v.content_type || "").replace(/^(video|image)\//, "")}
+                      </div>
+                    </div>
+
+                    {isImg && (
+                      <div
+                        className="flex items-center gap-2 text-xs text-zinc-500"
+                        data-testid="upload-duration-controls"
+                      >
+                        <Clock className="w-3.5 h-3.5" />
+                        <input
+                          type="number"
+                          min={1}
+                          max={3600}
+                          step={1}
+                          defaultValue={v.duration || 5}
+                          onBlur={(e) => updateDuration(v.id, e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.target.blur();
+                          }}
+                          data-testid="upload-duration-input"
+                          className="w-16 bg-[#050505] border border-white/10 rounded px-2 py-1 text-white text-xs font-mono text-right focus:outline-none focus:border-[#F59E0B]"
+                        />
+                        <span className="text-zinc-600 font-mono">sek</span>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={() => remove(v.id)}
+                      data-testid="upload-delete-button"
+                      className="inline-flex items-center gap-2 text-xs text-zinc-500 hover:text-red-400 px-3 py-1.5 border border-white/10 hover:border-red-500/40 rounded-md transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Slett
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

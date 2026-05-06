@@ -1,0 +1,32 @@
+{
+  "summary": "P3 switcher iteration full-stack test. Backend: 40/40 pytest pass — all 28 pre-existing tests still green (schema migration clean), plus 12 new /app/backend/tests/test_switcher.py tests covering image upload with Form duration, PATCH /videos/{id}/duration (images-only, 400 on video, 401 without auth), GET /videos exposing media_type+duration+has_thumbnail, WS set_pvw (does not touch PGM), WS set_pgm (frozen, current_time=0, is_playing=false), WS cut (swaps pvw<->pgm, new PGM frozen), play no-op when PGM null, next/prev move PVW only. Frontend e2e on /control, /upload, /display verified via Playwright: login → PVW monitor (PVW · PREVIEW emerald) and PGM monitor (PGM · ON AIR red) both render; CUT button is the big amber central button, disabled when pvw_id null, enabled after selecting a playlist item; layout PREV.x=1041 < CUT.x=1097 < NEXT.x=1312 confirms horizontal centering; clicking CUT shows toast 'CUT — PVW → PGM' and playlist item gains PGM label; PGM transport play-pause button class contains 'red' (not amber); ENTER and SPACE keyboard shortcuts fire without error. /upload: file input accept='video/*,image/*'; uploaded a 1x1 PNG — BILDE badge appears, duration input defaults to 5 and accepts 9 on blur (PATCH persists); 3 BILDE + 3 VIDEO badges co-exist in library. /display shows kiosk-start overlay as expected (public page, fullscreen gesture required).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_p2_features.py",
+    "/app/backend/tests/test_switcher.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 733 lines — split into routers (auth/videos/state) + ws/manager is overdue; the WS handler alone is 100 lines of if/elif.",
+    "WS handler re-queries the ENTIRE videos collection (find().to_list(1000)) on EVERY message just to resolve next/prev/set_pvw id membership. For a busy room this is wasteful; cache the id list or restrict the query to {id:1}.",
+    "cut swaps old PGM → PVW unconditionally, even when old PGM is None. Result: if PGM was empty, PVW is nulled after cut. That matches the 'back-cut' intent but silently drops the thing the operator just cued up. Consider only moving old PGM into PVW when it's non-null, keeping the previous PVW until it is explicitly cleared.",
+    "ended action matches on media_id but only freezes pgm; if a display sends a stale ended for the previous PGM after a quick cut, the old id won't match and state is untouched — correct, but the display has no feedback that its ended was ignored. Minor.",
+    "PATCH /videos/{id}/duration clamps 1.0..3600.0 but the response only returns {ok,duration}; consider returning the full media doc so clients don't need a re-fetch.",
+    "Upload.jsx sends PATCH on input blur; rapid typing + tabbing could race. Debounce 300ms or send on Enter/blur only (which it already does via Tab/blur). Acceptable.",
+    "Display.jsx uses requestFullscreen that must be user-initiated — already handled via display-kiosk-start gesture overlay. Good.",
+    "Control.jsx clicking a playlist item sets PVW (emerald), but there's no visible way to clear PVW other than clicking the currently-previewing item again; consider an 'X' on the PVW monitor header."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_switcher.py (new — 12 P3 tests)"
+  ],
+  "success_rate": {"backend": "100% (40/40)", "frontend": "100%"},
+  "test_credentials": "App password 'kino123' (/app/memory/test_credentials.md). JWT in localStorage 'kinokontroll_token'.",
+  "seed_data_creation": "test_switcher.py uploads TEST_still.png / TEST_clip.mp4 / TEST_sw_*.mp4 / TEST_cut_*.mp4 / TEST_np_*.mp4 and soft-deletes them in fixtures. Rooms sw-*, ended-*, stale-* get persisted (~150 bytes each) via WS connects. A leftover TEST_frontpage.png from the Playwright run was cleaned up via API.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && python -m pytest tests/ -v --asyncio-mode=auto. Three test files: backend_test.py (17), test_p2_features.py (11), test_switcher.py (12) = 40 total. New testids to rely on for switcher: 'pvw-monitor','pvw-monitor-title','pgm-monitor','pgm-monitor-title','pgm-freeze-badge','control-cut-button','control-prev-button','control-next-button','control-play-pause-button','control-playlist-item','upload-duration-input','upload-duration-controls','display-page','display-video','display-image','display-idle','display-kiosk-start'. WS protocol: state uses pvw_id/pgm_id (NO current_video_id), valid actions {play,pause,toggle,next,prev,set_pvw,set_pgm,cut,seek,volume,mute,loop,time_update,ended}; PUBLIC_ACTIONS={ended,time_update}. cut always freezes new PGM (is_playing=false, current_time=0) and swaps old PGM into PVW. 'ended' only freezes when media_id matches pgm_id; mismatched ids are ignored.",
+  "rca_of_the_issue": "N/A — all features behave as specified."
+}

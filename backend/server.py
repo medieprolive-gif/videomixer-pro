@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Header, Query, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Header, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -148,8 +148,10 @@ async def verify(_: bool = Depends(require_auth)):
     return {"ok": True}
 
 
-# ---------- Video models ----------
+# ---------- Media models ----------
 class VideoOut(BaseModel):
+    """Represents a media item (video or image)."""
+
     model_config = ConfigDict(extra="ignore")
     id: str
     filename: str
@@ -158,24 +160,47 @@ class VideoOut(BaseModel):
     size: int
     created_at: str
     has_thumbnail: bool = False
+    media_type: str = "video"  # "video" | "image"
+    duration: float = 5.0  # only meaningful for images (seconds)
+
+
+VIDEO_EXTS = {"mp4", "webm", "mov", "mkv", "avi", "ogg"}
+IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
+
+
+def _detect_media_type(content_type: Optional[str], filename: Optional[str]) -> Optional[str]:
+    ct = (content_type or "").lower()
+    if ct.startswith("video/"):
+        return "video"
+    if ct.startswith("image/"):
+        return "image"
+    ext = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+    if ext in VIDEO_EXTS:
+        return "video"
+    if ext in IMAGE_EXTS:
+        return "image"
+    return None
 
 
 @api_router.post("/videos/upload", response_model=VideoOut)
-async def upload_video(file: UploadFile = File(...), _: bool = Depends(require_auth)):
-    if not file.content_type or not file.content_type.startswith("video/"):
-        # allow common mp4 even if browser sends application/octet-stream
-        ext = (file.filename or "").lower().split(".")[-1]
-        if ext not in {"mp4", "webm", "mov", "mkv", "avi", "ogg"}:
-            raise HTTPException(status_code=400, detail="Filen er ikke en gyldig videofil")
+async def upload_video(
+    file: UploadFile = File(...),
+    duration: Optional[float] = Form(None),
+    _: bool = Depends(require_auth),
+):
+    media_type = _detect_media_type(file.content_type, file.filename)
+    if media_type is None:
+        raise HTTPException(status_code=400, detail="Ikke en gyldig video- eller bildefil")
 
-    ext = (file.filename or "video.mp4").split(".")[-1]
-    video_id = str(uuid.uuid4())
-    storage_path = f"{APP_NAME}/videos/{video_id}.{ext}"
-    content_type = file.content_type or "video/mp4"
+    ext = (file.filename or f"media.{'mp4' if media_type == 'video' else 'jpg'}").split(".")[-1]
+    media_id = str(uuid.uuid4())
+    folder = "videos" if media_type == "video" else "images"
+    storage_path = f"{APP_NAME}/{folder}/{media_id}.{ext}"
+    content_type = file.content_type or ("video/mp4" if media_type == "video" else "image/jpeg")
 
     # Determine size without reading the whole file into memory.
     underlying = file.file
-    underlying.seek(0, 2)  # seek to end
+    underlying.seek(0, 2)
     size = underlying.tell()
     underlying.seek(0)
 
@@ -188,8 +213,6 @@ async def upload_video(file: UploadFile = File(...), _: bool = Depends(require_a
         )
 
     try:
-        # Stream the SpooledTemporaryFile directly to storage in a thread
-        # so we never load the whole video into memory and never block the loop.
         result = await asyncio.to_thread(
             put_object_stream, storage_path, underlying, content_type, size
         )
@@ -197,17 +220,48 @@ async def upload_video(file: UploadFile = File(...), _: bool = Depends(require_a
         logger.error(f"Storage upload failed: {e}")
         raise HTTPException(status_code=500, detail="Lagring feilet")
 
+    # Sanitize duration (images only)
+    safe_duration = 5.0
+    if media_type == "image" and duration is not None:
+        try:
+            safe_duration = max(1.0, min(3600.0, float(duration)))
+        except (TypeError, ValueError):
+            safe_duration = 5.0
+
     doc = {
-        "id": video_id,
+        "id": media_id,
         "filename": file.filename,
         "storage_path": result["path"],
         "content_type": content_type,
         "size": result.get("size", size),
         "is_deleted": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "media_type": media_type,
+        "duration": safe_duration,
     }
+    # For images, the file itself is its own thumbnail.
+    if media_type == "image":
+        doc["thumbnail_path"] = result["path"]
+        doc["thumbnail_content_type"] = content_type
     await db.videos.insert_one(doc.copy())
+    doc["has_thumbnail"] = bool(doc.get("thumbnail_path"))
     return VideoOut(**doc)
+
+
+class DurationUpdate(BaseModel):
+    duration: float
+
+
+@api_router.patch("/videos/{video_id}/duration")
+async def update_duration(video_id: str, payload: DurationUpdate, _: bool = Depends(require_auth)):
+    record = await db.videos.find_one({"id": video_id, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="Media ikke funnet")
+    if record.get("media_type") != "image":
+        raise HTTPException(status_code=400, detail="Varighet kan kun settes på stillbilder")
+    safe = max(1.0, min(3600.0, float(payload.duration)))
+    await db.videos.update_one({"id": video_id}, {"$set": {"duration": safe}})
+    return {"ok": True, "duration": safe}
 
 
 @api_router.get("/videos", response_model=List[VideoOut])
@@ -216,6 +270,8 @@ async def list_videos():
     out = []
     for i in items:
         i["has_thumbnail"] = bool(i.get("thumbnail_path"))
+        i.setdefault("media_type", "video")
+        i.setdefault("duration", 5.0)
         out.append(VideoOut(**i))
     return out
 
@@ -285,14 +341,20 @@ async def delete_video(video_id: str, _: bool = Depends(require_auth)):
     res = await db.videos.update_one({"id": video_id}, {"$set": {"is_deleted": True}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Video ikke funnet")
-    # If the deleted clip is currently playing in any room, clear & broadcast.
+    # If the deleted clip is currently in any room's PVW or PGM, clear & broadcast.
     rooms = await db.playback_state.distinct("id")
     for room in rooms or [DEFAULT_ROOM]:
         state = await get_state_doc(room)
-        if state.get("current_video_id") == video_id:
-            state["current_video_id"] = None
+        changed = False
+        if state.get("pgm_id") == video_id:
+            state["pgm_id"] = None
             state["is_playing"] = False
             state["current_time"] = 0
+            changed = True
+        if state.get("pvw_id") == video_id:
+            state["pvw_id"] = None
+            changed = True
+        if changed:
             await save_state(state, room)
             await broadcast_state(state, room)
     return {"ok": True}
@@ -425,7 +487,8 @@ DEFAULT_ROOM = "default"
 def _default_state(room: str) -> Dict[str, Any]:
     return {
         "id": room,
-        "current_video_id": None,
+        "pvw_id": None,
+        "pgm_id": None,
         "is_playing": False,
         "current_time": 0.0,
         "volume": 1.0,
@@ -433,6 +496,18 @@ def _default_state(room: str) -> Dict[str, Any]:
         "loop": False,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _migrate_state(s: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure legacy state docs have the PVW/PGM fields."""
+    changed = False
+    if "pgm_id" not in s:
+        s["pgm_id"] = s.pop("current_video_id", None)
+        changed = True
+    if "pvw_id" not in s:
+        s["pvw_id"] = None
+        changed = True
+    return s if not changed else s
 
 
 def _normalize_room(room: Optional[str]) -> str:
@@ -450,6 +525,8 @@ async def get_state_doc(room: str) -> Dict[str, Any]:
     if not s:
         s = _default_state(room)
         await db.playback_state.insert_one(s.copy())
+    else:
+        s = _migrate_state(s)
     return s
 
 
@@ -524,47 +601,22 @@ async def broadcast_state(state: Dict[str, Any], room: str):
     await manager.broadcast({"type": "state", "state": state}, room)
 
 
-VALID_ACTIONS = {"play", "pause", "toggle", "next", "prev", "select", "seek", "volume", "mute", "loop", "time_update", "ended"}
-# Actions that are passively reported by the (unauthenticated) display page.
-PUBLIC_ACTIONS = {"ended"}
-
-
-async def _advance_to_next(state: Dict[str, Any], ids: List[str], from_id: Optional[str]) -> Dict[str, Any]:
-    """Advance playback to the next clip after `from_id`. Stops if at the end and no loop."""
-    if not ids:
-        state["current_video_id"] = None
-        state["is_playing"] = False
-        state["current_time"] = 0
-        return state
-    if from_id in ids:
-        idx = ids.index(from_id)
-        if idx + 1 < len(ids):
-            state["current_video_id"] = ids[idx + 1]
-            state["current_time"] = 0
-            state["is_playing"] = True
-        else:
-            # Reached the end of the playlist
-            if state.get("loop"):
-                state["current_video_id"] = ids[0]
-                state["current_time"] = 0
-                state["is_playing"] = True
-            else:
-                state["is_playing"] = False
-                state["current_time"] = 0
-    else:
-        state["current_video_id"] = ids[0]
-        state["current_time"] = 0
-        state["is_playing"] = True
-    return state
+VALID_ACTIONS = {
+    "play", "pause", "toggle",
+    "next", "prev",
+    "set_pvw", "set_pgm", "cut",
+    "seek", "volume", "mute", "loop",
+    "time_update", "ended",
+}
+# Actions that the (unauthenticated) display page is allowed to send.
+PUBLIC_ACTIONS = {"ended", "time_update"}
 
 
 @app.websocket("/api/ws")
 async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
     room = _normalize_room(room)
-    # Accept all; control actions require token, display passive actions are public
     await manager.connect(ws, room)
     try:
-        # Send current state on connect
         s = await get_state_doc(room)
         await ws.send_json({"type": "state", "state": s})
 
@@ -579,7 +631,6 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
             if action not in VALID_ACTIONS:
                 continue
 
-            # Auth gate (display-only "ended" is allowed without token)
             if action not in PUBLIC_ACTIONS:
                 token = msg.get("token")
                 if not token or not verify_token(token):
@@ -591,43 +642,53 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
             ids = [v["id"] for v in videos]
 
             if action == "play":
-                state["is_playing"] = True
-                if not state.get("current_video_id") and ids:
-                    state["current_video_id"] = ids[0]
-                    state["current_time"] = 0
+                # Only meaningful if there is something in PGM
+                if state.get("pgm_id"):
+                    state["is_playing"] = True
             elif action == "pause":
                 state["is_playing"] = False
             elif action == "toggle":
-                state["is_playing"] = not state.get("is_playing", False)
-                if state["is_playing"] and not state.get("current_video_id") and ids:
-                    state["current_video_id"] = ids[0]
-                    state["current_time"] = 0
+                if state.get("pgm_id"):
+                    state["is_playing"] = not state.get("is_playing", False)
             elif action == "next":
-                cur = state.get("current_video_id")
-                if cur in ids:
-                    idx = ids.index(cur)
-                    next_idx = (idx + 1) % len(ids)
-                    state["current_video_id"] = ids[next_idx]
+                # Move PVW to the next clip in the playlist.
+                cur_pvw = state.get("pvw_id")
+                if cur_pvw in ids:
+                    idx = ids.index(cur_pvw)
+                    state["pvw_id"] = ids[(idx + 1) % len(ids)]
                 elif ids:
-                    state["current_video_id"] = ids[0]
-                state["current_time"] = 0
-                state["is_playing"] = True
+                    state["pvw_id"] = ids[0]
             elif action == "prev":
-                cur = state.get("current_video_id")
-                if cur in ids:
-                    idx = ids.index(cur)
-                    prev_idx = (idx - 1) % len(ids)
-                    state["current_video_id"] = ids[prev_idx]
+                cur_pvw = state.get("pvw_id")
+                if cur_pvw in ids:
+                    idx = ids.index(cur_pvw)
+                    state["pvw_id"] = ids[(idx - 1) % len(ids)]
                 elif ids:
-                    state["current_video_id"] = ids[0]
-                state["current_time"] = 0
-                state["is_playing"] = True
-            elif action == "select":
-                vid = msg.get("video_id")
+                    state["pvw_id"] = ids[0]
+            elif action == "set_pvw":
+                vid = msg.get("media_id") or msg.get("video_id")
+                if vid is None or vid in ids:
+                    state["pvw_id"] = vid if vid in ids else None
+            elif action == "set_pgm":
+                # Manual override: directly load PGM, frozen.
+                vid = msg.get("media_id") or msg.get("video_id")
                 if vid in ids:
-                    state["current_video_id"] = vid
+                    state["pgm_id"] = vid
                     state["current_time"] = 0
-                    state["is_playing"] = True
+                    state["is_playing"] = False
+                elif vid is None:
+                    state["pgm_id"] = None
+                    state["current_time"] = 0
+                    state["is_playing"] = False
+            elif action == "cut":
+                # Broadcast-style cut: PVW becomes new PGM, frozen on first frame.
+                # The previous PGM moves into PVW (so a quick "back-cut" is possible).
+                old_pgm = state.get("pgm_id")
+                new_pgm = state.get("pvw_id")
+                state["pgm_id"] = new_pgm
+                state["pvw_id"] = old_pgm
+                state["current_time"] = 0
+                state["is_playing"] = False
             elif action == "seek":
                 t = msg.get("time")
                 if isinstance(t, (int, float)):
@@ -645,12 +706,10 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
                 if isinstance(t, (int, float)):
                     state["current_time"] = float(max(0, t))
             elif action == "ended":
-                # Display reports the playing video ended. Confirm it's the current one,
-                # then auto-advance (or stop). Browser handles loop natively when loop flag is on,
-                # so this won't fire when loop is enabled.
-                ended_id = msg.get("video_id")
-                if ended_id == state.get("current_video_id"):
-                    state = await _advance_to_next(state, ids, ended_id)
+                # Freeze on last frame: do NOT auto-advance, just stop playback.
+                ended_id = msg.get("video_id") or msg.get("media_id")
+                if ended_id == state.get("pgm_id"):
+                    state["is_playing"] = False
 
             await save_state(state, room)
             await broadcast_state(state, room)

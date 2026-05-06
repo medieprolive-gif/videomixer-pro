@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import { Film, Maximize2 } from "lucide-react";
 import { useSync } from "../lib/useSync";
-import { streamUrl } from "../lib/api";
+import { api, streamUrl, thumbUrl } from "../lib/api";
 
 function isFullscreen() {
   return Boolean(
@@ -49,6 +49,8 @@ export default function Display() {
   const { room } = useParams();
   const roomId = room || "default";
   const { state, sendPublic } = useSync(roomId);
+
+  const [media, setMedia] = useState([]);
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const [currentSrcId, setCurrentSrcId] = useState(null);
@@ -56,8 +58,33 @@ export default function Display() {
   const [fs, setFs] = useState(false);
   const [showKioskOverlay, setShowKioskOverlay] = useState(true);
   const cursorTimer = useRef(null);
+  const imageTimer = useRef(null);
 
-  // Track fullscreen state changes (incl. user pressing ESC)
+  // Load media library (so we know media_type / duration of pgm_id)
+  const loadMedia = useCallback(async () => {
+    try {
+      const r = await api.get("/videos");
+      setMedia(r.data || []);
+    } catch (_) {
+      /* noop */
+    }
+  }, []);
+  useEffect(() => {
+    loadMedia();
+  }, [loadMedia]);
+  useEffect(() => {
+    // Refetch when pgm changes (e.g., new uploads while open)
+    loadMedia();
+  }, [state?.pgm_id, loadMedia]);
+
+  const pgm = useMemo(
+    () => media.find((m) => m.id === state?.pgm_id) || null,
+    [media, state?.pgm_id]
+  );
+  const isVideo = pgm?.media_type === "video";
+  const isImage = pgm?.media_type === "image";
+
+  // Track fullscreen changes
   useEffect(() => {
     const onChange = () => {
       const inFs = isFullscreen();
@@ -72,8 +99,7 @@ export default function Display() {
     };
   }, []);
 
-  // Try auto-fullscreen on mount (browsers usually require a gesture, so
-  // this is best-effort; otherwise the kiosk overlay handles it on click).
+  // Try auto-fullscreen
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -87,23 +113,20 @@ export default function Display() {
     };
   }, []);
 
-  // F key toggles fullscreen, ESC exits (browser default already handles ESC)
+  // F key toggles fullscreen
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "f" || e.key === "F") {
         e.preventDefault();
-        if (isFullscreen()) {
-          exitFullscreen();
-        } else if (containerRef.current) {
-          enterFullscreen(containerRef.current);
-        }
+        if (isFullscreen()) exitFullscreen();
+        else if (containerRef.current) enterFullscreen(containerRef.current);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Cursor hide on idle
+  // Cursor hide
   useEffect(() => {
     const onMove = () => {
       setShowCursor(true);
@@ -117,39 +140,26 @@ export default function Display() {
     };
   }, []);
 
-  // Swap source when video changes
+  // Swap video src when PGM video changes
   useEffect(() => {
-    if (!state) return;
+    if (!isVideo) return;
     const v = videoRef.current;
     if (!v) return;
-    if (state.current_video_id !== currentSrcId) {
-      setCurrentSrcId(state.current_video_id);
-      if (state.current_video_id) {
-        v.src = streamUrl(state.current_video_id);
+    if (state?.pgm_id !== currentSrcId) {
+      setCurrentSrcId(state?.pgm_id);
+      if (state?.pgm_id) {
+        v.src = streamUrl(state.pgm_id);
         v.load();
       } else {
         v.removeAttribute("src");
         v.load();
       }
     }
-  }, [state, currentSrcId]);
+  }, [state?.pgm_id, currentSrcId, isVideo]);
 
-  // Auto-advance: when video ends and loop is OFF, ask backend to play next.
+  // Apply playback state to <video>
   useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const onEnded = () => {
-      if (state?.current_video_id) {
-        sendPublic({ action: "ended", video_id: state.current_video_id });
-      }
-    };
-    v.addEventListener("ended", onEnded);
-    return () => v.removeEventListener("ended", onEnded);
-  }, [state?.current_video_id, sendPublic]);
-
-  // Apply playback state
-  useEffect(() => {
-    if (!state) return;
+    if (!state || !isVideo) return;
     const v = videoRef.current;
     if (!v) return;
     v.volume = state.volume ?? 1;
@@ -173,16 +183,42 @@ export default function Display() {
     } else {
       v.pause();
     }
-  }, [state]);
+  }, [state, isVideo]);
+
+  // Video ended -> notify backend (freezes on last frame, no auto-advance)
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onEnded = () => {
+      if (state?.pgm_id) sendPublic({ action: "ended", media_id: state.pgm_id });
+    };
+    v.addEventListener("ended", onEnded);
+    return () => v.removeEventListener("ended", onEnded);
+  }, [state?.pgm_id, sendPublic]);
+
+  // Image duration timer
+  useEffect(() => {
+    if (imageTimer.current) {
+      clearTimeout(imageTimer.current);
+      imageTimer.current = null;
+    }
+    if (!isImage || !pgm || !state?.is_playing) return;
+    const dur = pgm.duration || 5;
+    const remaining = Math.max(0.2, dur - (state.current_time || 0));
+    imageTimer.current = setTimeout(() => {
+      if (state?.pgm_id) sendPublic({ action: "ended", media_id: state.pgm_id });
+    }, remaining * 1000);
+    return () => {
+      if (imageTimer.current) clearTimeout(imageTimer.current);
+    };
+  }, [isImage, pgm, state?.is_playing, state?.current_time, state?.pgm_id, sendPublic]);
 
   const enterKiosk = useCallback(async () => {
-    if (containerRef.current) {
-      await enterFullscreen(containerRef.current);
-    }
+    if (containerRef.current) await enterFullscreen(containerRef.current);
     setShowKioskOverlay(false);
   }, []);
 
-  const idle = !state?.current_video_id;
+  const idle = !state?.pgm_id;
 
   return (
     <div
@@ -195,10 +231,19 @@ export default function Display() {
       <video
         ref={videoRef}
         data-testid="display-video"
-        className={`w-full h-full object-contain bg-black ${idle ? "hidden" : ""}`}
+        className={`w-full h-full object-contain bg-black ${isVideo ? "" : "hidden"}`}
         playsInline
         autoPlay
       />
+
+      {isImage && pgm && (
+        <img
+          data-testid="display-image"
+          src={thumbUrl(pgm.id)}
+          alt={pgm.filename || ""}
+          className="w-full h-full object-contain bg-black"
+        />
+      )}
 
       {idle && !showKioskOverlay && (
         <div className="text-center" data-testid="display-idle">
@@ -217,8 +262,7 @@ export default function Display() {
         </div>
       )}
 
-      {/* Kiosk start overlay — required because browsers block auto-fullscreen
-          without a user gesture. Click anywhere to enter fullscreen. */}
+      {/* Kiosk start overlay */}
       {showKioskOverlay && (
         <button
           type="button"
@@ -249,7 +293,7 @@ export default function Display() {
         </button>
       )}
 
-      {/* Tiny indicator that we are in kiosk fullscreen mode (top-right, fades out with cursor) */}
+      {/* KIOSK indicator (top-right, fades with cursor) */}
       {fs && showCursor && (
         <div
           className="absolute top-4 right-4 z-40 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-zinc-500 font-mono bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-md border border-white/10"

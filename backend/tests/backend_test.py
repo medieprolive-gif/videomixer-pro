@@ -83,7 +83,7 @@ class TestState:
         r = requests.get(f"{API}/state")
         assert r.status_code == 200
         s = r.json()
-        for k in ["current_video_id", "is_playing", "current_time", "volume", "muted", "loop"]:
+        for k in ["pvw_id", "pgm_id", "is_playing", "current_time", "volume", "muted", "loop"]:
             assert k in s
 
 
