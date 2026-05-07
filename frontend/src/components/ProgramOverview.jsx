@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { thumbUrl, streamUrl } from "../lib/api";
+import NewsTicker from "./NewsTicker";
 
 const WEEKDAYS_NB = [
   "søndag",
@@ -297,7 +298,7 @@ export default function ProgramOverview({ active = true, settings, schedule, med
         <div
           className="absolute uppercase opacity-50"
           style={{
-            bottom: "2cqh",
+            bottom: "6cqh",
             right: "3cqw",
             fontSize: "1.4cqh",
             letterSpacing: "0.3em",
@@ -306,6 +307,9 @@ export default function ProgramOverview({ active = true, settings, schedule, med
           Sal · {roomId}
         </div>
       </div>
+
+      {/* NRK news ticker — pinned to the very bottom of the overview only */}
+      <NewsTicker active={active} />
     </div>
   );
 }

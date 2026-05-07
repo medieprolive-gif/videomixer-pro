@@ -1478,6 +1478,51 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
         await manager.disconnect(ws, room)
 
 
+# ---------- Public news ticker (NRK RSS) ----------
+NRK_RSS_URL = os.environ.get("NRK_RSS_URL", "https://www.nrk.no/nyheter/siste.rss")
+_news_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
+_NEWS_TTL_SEC = 300  # 5 min
+
+
+def _fetch_nrk_news_sync() -> List[str]:
+    """Fetch + parse NRK RSS. Sync helper run in a thread by the route."""
+    import feedparser  # local import keeps cold start small
+
+    parsed = feedparser.parse(
+        NRK_RSS_URL,
+        request_headers={"User-Agent": "KinoKontroll/1.0 (display ticker)"},
+    )
+    titles: List[str] = []
+    for entry in (parsed.entries or [])[:25]:
+        t = (entry.get("title") or "").strip()
+        if t:
+            titles.append(t)
+    return titles
+
+
+@api_router.get("/news/nrk")
+async def get_nrk_news():
+    """Public endpoint for the /display ticker. Cached for 5 minutes."""
+    now_ts = time.time()
+    if _news_cache["items"] and (now_ts - _news_cache["ts"]) < _NEWS_TTL_SEC:
+        return {"source": "NRK", "items": _news_cache["items"], "cached": True}
+    try:
+        items = await asyncio.to_thread(_fetch_nrk_news_sync)
+        if items:
+            _news_cache["items"] = items
+            _news_cache["ts"] = now_ts
+        return {"source": "NRK", "items": items, "cached": False}
+    except Exception as e:
+        logger.warning(f"NRK RSS fetch failed: {e}")
+        # Serve stale cache if available rather than 500
+        return {
+            "source": "NRK",
+            "items": _news_cache["items"],
+            "cached": True,
+            "stale": True,
+        }
+
+
 # Register router
 app.include_router(api_router)
 
