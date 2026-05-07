@@ -298,8 +298,9 @@ class VideoOut(BaseModel):
     size: int = 0
     created_at: str
     has_thumbnail: bool = False
-    media_type: str = "video"  # "video" | "image" | "stream"
-    duration: float = 5.0  # only meaningful for images (seconds)
+    media_type: str = "video"  # "video" | "image" | "stream" | "audio"
+    duration: float = 5.0  # seconds
+    category: str = "content"  # "content" (timeline media) | "asset" (logo/bg/bumper/music)
     # Live-stream fields (only when media_type == "stream")
     stream_url: Optional[str] = None
     stream_protocol: Optional[str] = None  # "srt" | "rtmp"
@@ -315,6 +316,7 @@ class StreamCreate(BaseModel):
 
 VIDEO_EXTS = {"mp4", "webm", "mov", "mkv", "avi", "ogg"}
 IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
+AUDIO_EXTS = {"mp3", "wav", "ogg", "m4a", "aac", "flac", "opus"}
 
 
 def _detect_media_type(content_type: Optional[str], filename: Optional[str]) -> Optional[str]:
@@ -323,11 +325,15 @@ def _detect_media_type(content_type: Optional[str], filename: Optional[str]) -> 
         return "video"
     if ct.startswith("image/"):
         return "image"
+    if ct.startswith("audio/"):
+        return "audio"
     ext = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
     if ext in VIDEO_EXTS:
         return "video"
     if ext in IMAGE_EXTS:
         return "image"
+    if ext in AUDIO_EXTS:
+        return "audio"
     return None
 
 
@@ -360,17 +366,26 @@ def _probe_duration_seconds(path: str) -> float:
 async def upload_video(
     file: UploadFile = File(...),
     duration: Optional[float] = Form(None),
+    category: Optional[str] = Form(None),
     _: bool = Depends(require_auth),
 ):
     media_type = _detect_media_type(file.content_type, file.filename)
     if media_type is None:
-        raise HTTPException(status_code=400, detail="Ikke en gyldig video- eller bildefil")
+        raise HTTPException(
+            status_code=400, detail="Ikke en gyldig video-, bilde- eller lydfil"
+        )
 
-    ext = (file.filename or f"media.{'mp4' if media_type == 'video' else 'jpg'}").split(".")[-1]
+    default_ext = {"video": "mp4", "image": "jpg", "audio": "mp3"}[media_type]
+    ext = (file.filename or f"media.{default_ext}").split(".")[-1]
     media_id = str(uuid.uuid4())
-    folder = "videos" if media_type == "video" else "images"
+    folder = {"video": "videos", "image": "images", "audio": "audio"}[media_type]
     storage_path = f"{APP_NAME}/{folder}/{media_id}.{ext}"
-    content_type = file.content_type or ("video/mp4" if media_type == "video" else "image/jpeg")
+    default_content_type = {
+        "video": "video/mp4",
+        "image": "image/jpeg",
+        "audio": "audio/mpeg",
+    }[media_type]
+    content_type = file.content_type or default_content_type
 
     # Determine size without reading the whole file into memory.
     underlying = file.file
@@ -386,11 +401,11 @@ async def upload_video(
             detail=f"Filen er for stor (maks {MAX_UPLOAD_MB} MB)",
         )
 
-    # For videos, write to a tempfile so we can ffprobe it for the actual
-    # duration BEFORE uploading. Then re-stream from disk to object storage.
-    probed_video_duration = 0.0
+    # For videos and audio, write to a tempfile so we can ffprobe it for the
+    # actual duration BEFORE uploading. Then re-stream from disk to object storage.
+    probed_duration = 0.0
     tmp_path: Optional[str] = None
-    if media_type == "video":
+    if media_type in ("video", "audio"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
             tmp_path = tmp.name
             while True:
@@ -398,7 +413,7 @@ async def upload_video(
                 if not chunk:
                     break
                 tmp.write(chunk)
-        probed_video_duration = await asyncio.to_thread(
+        probed_duration = await asyncio.to_thread(
             _probe_duration_seconds, tmp_path
         )
 
@@ -423,10 +438,10 @@ async def upload_video(
                 pass
 
     # Resolve duration:
-    #  - video: ffprobe-derived (fallback 0 → frontend will show "ukjent")
+    #  - video / audio: ffprobe-derived (fallback 0)
     #  - image: client-supplied display duration (default 5s)
-    if media_type == "video":
-        safe_duration = float(probed_video_duration or 0.0)
+    if media_type in ("video", "audio"):
+        safe_duration = float(probed_duration or 0.0)
     else:
         safe_duration = 5.0
         if duration is not None:
@@ -434,6 +449,11 @@ async def upload_video(
                 safe_duration = max(1.0, min(3600.0, float(duration)))
             except (TypeError, ValueError):
                 safe_duration = 5.0
+
+    # Category: explicit user choice OR sensible default (audio always asset).
+    cat = (category or "").strip().lower()
+    if cat not in ("content", "asset"):
+        cat = "asset" if media_type == "audio" else "content"
 
     doc = {
         "id": media_id,
@@ -445,6 +465,7 @@ async def upload_video(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "media_type": media_type,
         "duration": safe_duration,
+        "category": cat,
     }
     # For images, the file itself is its own thumbnail.
     if media_type == "image":
@@ -574,6 +595,10 @@ class FilenamePatch(BaseModel):
     filename: str
 
 
+class CategoryPatch(BaseModel):
+    category: str  # "content" | "asset"
+
+
 @api_router.patch("/videos/{video_id}/filename")
 async def update_filename(video_id: str, payload: FilenamePatch, _: bool = Depends(require_auth)):
     name = (payload.filename or "").strip()
@@ -587,6 +612,19 @@ async def update_filename(video_id: str, payload: FilenamePatch, _: bool = Depen
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Media ikke funnet")
     return {"ok": True, "filename": name}
+
+
+@api_router.patch("/videos/{video_id}/category")
+async def update_category(video_id: str, payload: CategoryPatch, _: bool = Depends(require_auth)):
+    cat = (payload.category or "").strip().lower()
+    if cat not in ("content", "asset"):
+        raise HTTPException(status_code=400, detail="Kategori må være content eller asset")
+    res = await db.videos.update_one(
+        {"id": video_id, "is_deleted": False}, {"$set": {"category": cat}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Media ikke funnet")
+    return {"ok": True, "category": cat}
 
 
 @api_router.get("/videos", response_model=List[VideoOut])
@@ -888,6 +926,8 @@ class RoomSettingsModel(BaseModel):
     program_overview_background_id: Optional[str] = None
     program_overview_text_color: str = "#FFFFFF"
     program_overview_duration: float = 8.0
+    program_overview_music_id: Optional[str] = None
+    program_overview_music_volume: float = 0.6
 
 
 def _settings_doc_from_payload(room: str, payload: RoomSettingsModel) -> Dict[str, Any]:
@@ -900,6 +940,10 @@ def _settings_doc_from_payload(room: str, payload: RoomSettingsModel) -> Dict[st
         "program_overview_background_id": payload.program_overview_background_id,
         "program_overview_text_color": payload.program_overview_text_color or "#FFFFFF",
         "program_overview_duration": float(payload.program_overview_duration or 8.0),
+        "program_overview_music_id": payload.program_overview_music_id,
+        "program_overview_music_volume": max(
+            0.0, min(1.0, float(payload.program_overview_music_volume or 0.6))
+        ),
     }
 
 
@@ -913,6 +957,8 @@ def _settings_with_defaults(room: str, s: Optional[Dict[str, Any]]) -> Dict[str,
         "program_overview_background_id": None,
         "program_overview_text_color": "#FFFFFF",
         "program_overview_duration": 8.0,
+        "program_overview_music_id": None,
+        "program_overview_music_volume": 0.6,
     }
     if s:
         base.update({k: v for k, v in s.items() if k in base})
@@ -1131,6 +1177,7 @@ async def create_stream(payload: StreamCreate, _: bool = Depends(require_auth)):
         "created_at": datetime.now(timezone.utc).isoformat(),
         "media_type": "stream",
         "duration": 0.0,
+        "category": "content",
         "stream_url": payload.stream_url,
         "stream_protocol": proto,
         "stream_mode": (payload.stream_mode or "caller").lower() if proto == "srt" else None,

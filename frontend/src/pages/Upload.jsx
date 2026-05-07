@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -16,6 +16,8 @@ import {
   Eraser,
   Radio,
   Plus,
+  Music,
+  ArrowRightLeft,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, authHeaders, API, clearToken, thumbUrl, streamUrl } from "../lib/api";
@@ -527,6 +529,7 @@ export default function Upload() {
   const [currentName, setCurrentName] = useState("");
   const [trimming, setTrimming] = useState(null);
   const [streamModal, setStreamModal] = useState(null);
+  const [tab, setTab] = useState("content"); // "content" | "asset"
   const inputRef = useRef(null);
   const navigate = useNavigate();
 
@@ -544,16 +547,19 @@ export default function Upload() {
     load();
   }, []);
 
-  const upload = async (file) => {
+  const upload = async (file, opts = {}) => {
     if (!file) return;
     setUploading(true);
     setProgress(0);
     setCurrentName(file.name);
     try {
-      const isImage = (file.type || "").startsWith("image/");
+      const ftype = (file.type || "").toLowerCase();
+      const isImage = ftype.startsWith("image/");
+      const isAudio = ftype.startsWith("audio/");
       const fd = new FormData();
       fd.append("file", file);
       if (isImage) fd.append("duration", "5");
+      if (opts.category) fd.append("category", opts.category);
       const res = await api.post("/videos/upload", fd, {
         headers: { ...authHeaders(), "Content-Type": "multipart/form-data" },
         onUploadProgress: (ev) => {
@@ -562,8 +568,8 @@ export default function Upload() {
       });
       const mediaId = res.data?.id;
 
-      // Best-effort video thumbnail extraction (skipped for images — backend already uses image as its own thumb)
-      if (!isImage) {
+      // Best-effort video thumbnail extraction (skipped for images & audio)
+      if (!isImage && !isAudio) {
         try {
           const thumb = await captureThumbnail(file);
           if (thumb && mediaId) {
@@ -595,7 +601,7 @@ export default function Upload() {
     for (const f of list) {
       // sequential to keep order & feedback clear
       // eslint-disable-next-line no-await-in-loop
-      await upload(f);
+      await upload(f, { category: tab });
     }
   };
 
@@ -634,6 +640,31 @@ export default function Upload() {
       toast.error(e?.response?.data?.detail || "Klarte ikke oppdatere navn");
     }
   };
+
+  const setCategory = async (id, category) => {
+    try {
+      await api.patch(`/videos/${id}/category`, { category });
+      setVideos((vs) => vs.map((v) => (v.id === id ? { ...v, category } : v)));
+      toast.success(category === "asset" ? "Flyttet til ressurser" : "Flyttet til programinnhold");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Kunne ikke endre kategori");
+    }
+  };
+
+  // Items in current tab. Audio always lives under "asset". Streams under
+  // "content". For everything else we honour the stored `category` (default
+  // content if unset, for backwards compat with media uploaded earlier).
+  const filteredVideos = useMemo(() => {
+    return videos.filter((v) => {
+      const cat =
+        v.media_type === "audio"
+          ? "asset"
+          : v.media_type === "stream"
+          ? "content"
+          : v.category || "content";
+      return cat === tab;
+    });
+  }, [videos, tab]);
 
   /**
    * Re-generate a thumbnail for an existing video by streaming it back from the server,
@@ -750,7 +781,7 @@ export default function Upload() {
           <input
             ref={inputRef}
             type="file"
-            accept="video/*,image/*"
+            accept="video/*,image/*,audio/*"
             multiple
             className="hidden"
             data-testid="upload-file-input"
@@ -790,23 +821,46 @@ export default function Upload() {
         {/* List */}
         <div className="mt-12">
           <div className="flex items-center justify-between mb-4">
+            <div className="inline-flex border border-white/10 rounded-md overflow-hidden bg-[#0A0A0A]">
+              {[
+                { v: "content", l: "Programinnhold" },
+                { v: "asset", l: "Ressurser" },
+              ].map((t) => (
+                <button
+                  key={t.v}
+                  onClick={() => setTab(t.v)}
+                  data-testid={`upload-tab-${t.v}`}
+                  className={`text-[11px] uppercase tracking-[0.2em] px-4 py-2 transition-colors ${
+                    tab === t.v
+                      ? "bg-[#F59E0B]/15 text-[#F59E0B]"
+                      : "text-zinc-500 hover:text-white"
+                  }`}
+                >
+                  {t.l}
+                </button>
+              ))}
+            </div>
             <h2 className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold">
-              Bibliotek · {videos.length}
+              {tab === "content" ? "Innhold" : "Logo / bakgrunn / bumper / musikk"} ·{" "}
+              {filteredVideos.length}
             </h2>
           </div>
 
-          {videos.length === 0 ? (
+          {filteredVideos.length === 0 ? (
             <div
               className="text-sm text-zinc-600 bg-[#0A0A0A] border border-white/10 rounded-lg px-6 py-10 text-center"
               data-testid="upload-empty"
             >
-              Ingen klipp lastet opp enda.
+              {tab === "content"
+                ? "Ingen videoklipp eller bilder lastet opp enda."
+                : "Ingen ressurser lagt til enda. Last opp logo, bakgrunn, bumper eller musikk her."}
             </div>
           ) : (
             <ul className="divide-y divide-white/5 bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden">
-              {videos.map((v) => {
+              {filteredVideos.map((v) => {
                 const isImg = v.media_type === "image";
                 const isStream = v.media_type === "stream";
+                const isAudio = v.media_type === "audio";
                 return (
                   <li
                     key={v.id}
@@ -825,6 +879,8 @@ export default function Upload() {
                         <ImageIcon className="w-4 h-4 text-[#F59E0B]" />
                       ) : isStream ? (
                         <Radio className="w-4 h-4 text-rose-400" />
+                      ) : isAudio ? (
+                        <Music className="w-4 h-4 text-emerald-400" />
                       ) : (
                         <Film className="w-4 h-4 text-[#F59E0B]" />
                       )}
@@ -853,18 +909,30 @@ export default function Upload() {
                           className={`text-[9px] uppercase tracking-[0.15em] font-mono px-1.5 py-0.5 rounded border shrink-0 ${
                             isStream
                               ? "text-rose-400 border-rose-400/40 bg-rose-400/5"
+                              : isAudio
+                              ? "text-emerald-400 border-emerald-400/40 bg-emerald-400/5"
                               : isImg
                               ? "text-[#F59E0B] border-[#F59E0B]/40 bg-[#F59E0B]/5"
                               : "text-zinc-500 border-white/10"
                           }`}
                         >
-                          {isStream ? `STRØM · ${(v.stream_protocol || "").toUpperCase()}` : isImg ? "BILDE" : "VIDEO"}
+                          {isStream
+                            ? `STRØM · ${(v.stream_protocol || "").toUpperCase()}`
+                            : isAudio
+                            ? "MUSIKK"
+                            : isImg
+                            ? "BILDE"
+                            : "VIDEO"}
                         </span>
                       </div>
                       <div className="text-xs text-zinc-600 font-mono truncate">
                         {isStream
                           ? v.stream_url
-                          : `${formatSize(v.size)} · ${(v.content_type || "").replace(/^(video|image)\//, "")}`}
+                          : `${formatSize(v.size)} · ${(v.content_type || "").replace(/^(video|image|audio)\//, "")}${
+                              isAudio && v.duration
+                                ? ` · ${Math.floor(v.duration / 60)}:${String(Math.round(v.duration % 60)).padStart(2, "0")}`
+                                : ""
+                            }`}
                       </div>
                     </div>
 
@@ -891,7 +959,7 @@ export default function Upload() {
                       </div>
                     )}
 
-                    {!isImg && !isStream && !v.has_thumbnail && (
+                    {!isImg && !isStream && !isAudio && !v.has_thumbnail && (
                       <button
                         onClick={() => regenerateThumb(v)}
                         data-testid="upload-regenerate-thumb-button"
@@ -902,7 +970,7 @@ export default function Upload() {
                       </button>
                     )}
 
-                    {!isImg && !isStream && (
+                    {!isImg && !isStream && !isAudio && (
                       <button
                         onClick={() => setTrimming(v)}
                         data-testid="upload-trim-button"
@@ -911,6 +979,26 @@ export default function Upload() {
                       >
                         <Scissors className="w-3 h-3" />
                         Trim
+                      </button>
+                    )}
+
+                    {/* Move between content/asset (not for streams or audio
+                        which have a fixed category). */}
+                    {!isStream && !isAudio && (
+                      <button
+                        onClick={() =>
+                          setCategory(v.id, tab === "content" ? "asset" : "content")
+                        }
+                        data-testid="upload-move-category-button"
+                        title={
+                          tab === "content"
+                            ? "Flytt til ressurser (logo/bakgrunn/bumper)"
+                            : "Flytt til programinnhold"
+                        }
+                        className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.15em] text-zinc-400 hover:text-[#F59E0B] px-2 py-1 border border-white/10 hover:border-[#F59E0B]/40 rounded transition-colors"
+                      >
+                        <ArrowRightLeft className="w-3 h-3" />
+                        {tab === "content" ? "Til ressurser" : "Til innhold"}
                       </button>
                     )}
 

@@ -50,6 +50,8 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
   const textColor = settings?.program_overview_text_color || "#FFFFFF";
   const logoId = settings?.program_overview_logo_id;
   const bgId = settings?.program_overview_background_id;
+  const musicId = settings?.program_overview_music_id;
+  const musicVolume = settings?.program_overview_music_volume ?? 0.6;
   const logoMedia = (media || []).find((m) => m.id === logoId);
   const bgMedia = (media || []).find((m) => m.id === bgId);
   const bgIsVideo = bgMedia?.media_type === "video";
@@ -97,6 +99,21 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
         containerType: "size",
       }}
     >
+      {/* Looping background music — only present when overview is rendered.
+          Volume controlled via room settings, looped indefinitely. */}
+      {musicId && (
+        <audio
+          key={musicId}
+          src={streamUrl(musicId)}
+          autoPlay
+          loop
+          ref={(el) => {
+            if (el) el.volume = Math.max(0, Math.min(1, musicVolume));
+          }}
+          data-testid="program-overview-music"
+        />
+      )}
+
       {/* Looping video background (animated) */}
       {bgIsVideo && bgId && (
         <video

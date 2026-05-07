@@ -19,6 +19,7 @@ import {
   Upload as UploadIcon,
   LayoutGrid,
   Loader2,
+  Music,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, clearToken, streamUrl, thumbUrl } from "../lib/api";
@@ -114,9 +115,26 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const videos = useMemo(() => media.filter((m) => m.media_type === "video"), [media]);
-  const images = useMemo(() => media.filter((m) => m.media_type === "image"), [media]);
+  const videos = useMemo(() => media.filter((m) => m.media_type === "video" && (m.category || "content") === "content"), [media]);
+  const images = useMemo(() => media.filter((m) => m.media_type === "image" && (m.category || "content") === "content"), [media]);
   const streams = useMemo(() => media.filter((m) => m.media_type === "stream"), [media]);
+  // Library of "asset" media (not shown in timeline media picker, but used as
+  // logo / background / bumper / overview music).
+  const assetImages = useMemo(
+    () => media.filter((m) => m.media_type === "image" && m.category === "asset"),
+    [media]
+  );
+  const assetMedia = useMemo(
+    () =>
+      media.filter(
+        (m) => m.category === "asset" || m.media_type === "audio"
+      ),
+    [media]
+  );
+  const assetMusic = useMemo(
+    () => media.filter((m) => m.media_type === "audio"),
+    [media]
+  );
 
   const save = async () => {
     if (!draft.scheduled_at || !draft.media_id) {
@@ -764,6 +782,8 @@ export default function Playout() {
     program_overview_background_id: null,
     program_overview_text_color: "#FFFFFF",
     program_overview_duration: 8,
+    program_overview_music_id: null,
+    program_overview_music_volume: 0.6,
   });
   const [now, setNow] = useState(new Date());
   const { state } = useSync(roomId);
@@ -774,6 +794,7 @@ export default function Playout() {
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [uploadingBg, setUploadingBg] = useState(false);
   const [uploadingBumper, setUploadingBumper] = useState(false);
+  const [uploadingMusic, setUploadingMusic] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -817,6 +838,8 @@ export default function Playout() {
         program_overview_background_id: settings.program_overview_background_id || null,
         program_overview_text_color: settings.program_overview_text_color || "#FFFFFF",
         program_overview_duration: parseFloat(settings.program_overview_duration) || 8,
+        program_overview_music_id: settings.program_overview_music_id || null,
+        program_overview_music_volume: parseFloat(settings.program_overview_music_volume) || 0.6,
       });
       toast.success("Innstillinger lagret");
     } catch (_) {
@@ -824,24 +847,29 @@ export default function Playout() {
     }
   };
 
-  /** Upload an image OR video and persist its id under the given settings field. */
+  /** Upload an image, video or audio file and persist its id under the
+   *  given settings field. Newly uploaded files are tagged as "asset" so
+   *  they don't show up as content in the timeline picker. */
   const uploadImageToSetting = async (file, settingKey, busySetter) => {
     if (!file) return;
-    const isMedia = file.type.startsWith("image/") || file.type.startsWith("video/");
+    const isMedia =
+      file.type.startsWith("image/") ||
+      file.type.startsWith("video/") ||
+      file.type.startsWith("audio/");
     if (!isMedia) {
-      toast.error("Bare bilde- eller videofiler kan brukes her");
+      toast.error("Bare bilde-, video- eller lydfiler kan brukes her");
       return;
     }
     busySetter(true);
     try {
       const fd = new FormData();
       fd.append("file", file);
+      fd.append("category", "asset");
       const r = await api.post("/videos/upload", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       const newId = r.data?.id;
       if (!newId) throw new Error("Manglet id i svar");
-      // Save the new setting immediately so it sticks even before user clicks "Lagre".
       const next = { ...settings, [settingKey]: newId };
       setSettings(next);
       await api.put(`/rooms/${roomId}/settings`, {
@@ -853,8 +881,11 @@ export default function Playout() {
         program_overview_background_id: next.program_overview_background_id || null,
         program_overview_text_color: next.program_overview_text_color || "#FFFFFF",
         program_overview_duration: parseFloat(next.program_overview_duration) || 8,
+        program_overview_music_id: next.program_overview_music_id || null,
+        program_overview_music_volume:
+          parseFloat(next.program_overview_music_volume) || 0.6,
       });
-      toast.success("Bilde lastet opp");
+      toast.success("Filen lastet opp");
       loadAll();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Opplasting feilet");
@@ -1068,13 +1099,15 @@ export default function Playout() {
                   className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-[#F59E0B]"
                   title="Eller velg fra eksisterende mediabibliotek"
                 >
-                  <option value="">— Velg fra bibliotek —</option>
-                  {media.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.media_type === "video" ? "🎬 " : "🖼 "}
-                      {m.filename}
-                    </option>
-                  ))}
+                  <option value="">— Velg fra ressurser —</option>
+                  {assetMedia
+                    .filter((m) => m.media_type === "image" || m.media_type === "video")
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.media_type === "video" ? "🎬 " : "🖼 "}
+                        {m.filename}
+                      </option>
+                    ))}
                 </select>
               </div>
             </div>
@@ -1296,6 +1329,106 @@ export default function Playout() {
                 data-testid="playout-overview-duration"
                 className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
               />
+            </div>
+
+            {/* Background music (looped) */}
+            <div className="md:col-span-2">
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                Bakgrunns­musikk (looper på programoversikten)
+              </label>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="w-12 h-12 rounded bg-black/60 border border-white/10 flex items-center justify-center shrink-0">
+                  {settings.program_overview_music_id ? (
+                    <Music className="w-5 h-5 text-emerald-400" />
+                  ) : (
+                    <Music className="w-5 h-5 text-zinc-600" />
+                  )}
+                </div>
+                <select
+                  value={settings.program_overview_music_id || ""}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      program_overview_music_id: e.target.value || null,
+                    })
+                  }
+                  data-testid="playout-overview-music"
+                  className="flex-1 min-w-[200px] bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-[#F59E0B]"
+                >
+                  <option value="">— Ingen musikk —</option>
+                  {assetMusic.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      🎵 {m.filename}
+                      {m.duration ? ` · ${Math.floor(m.duration / 60)}:${String(Math.round(m.duration % 60)).padStart(2, "0")}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <label
+                  className={`inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] px-3 py-2 border border-white/10 rounded-md cursor-pointer transition-colors ${
+                    uploadingMusic
+                      ? "text-zinc-600 border-white/5 cursor-wait"
+                      : "text-zinc-300 hover:text-[#F59E0B] hover:border-[#F59E0B]/40"
+                  }`}
+                  data-testid="playout-overview-music-upload"
+                >
+                  {uploadingMusic ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <UploadIcon className="w-3.5 h-3.5" />
+                  )}
+                  Last opp musikk
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    disabled={uploadingMusic}
+                    onChange={(e) =>
+                      uploadImageToSetting(
+                        e.target.files?.[0],
+                        "program_overview_music_id",
+                        setUploadingMusic
+                      )
+                    }
+                  />
+                </label>
+                {settings.program_overview_music_id && (
+                  <button
+                    onClick={() =>
+                      setSettings({ ...settings, program_overview_music_id: null })
+                    }
+                    title="Fjern musikk"
+                    data-testid="playout-overview-music-clear"
+                    className="text-zinc-500 hover:text-red-400 p-1.5 rounded hover:bg-red-500/10"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              {settings.program_overview_music_id && (
+                <div className="flex items-center gap-3 mt-3">
+                  <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-500 shrink-0">
+                    Volum
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={settings.program_overview_music_volume ?? 0.6}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        program_overview_music_volume: e.target.value,
+                      })
+                    }
+                    data-testid="playout-overview-music-volume"
+                    className="flex-1 accent-[#F59E0B]"
+                  />
+                  <span className="text-[10px] font-mono text-zinc-400 w-10 text-right">
+                    {Math.round((settings.program_overview_music_volume ?? 0.6) * 100)}%
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
