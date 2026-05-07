@@ -46,9 +46,10 @@ export default function NewsTicker({ active = true }) {
 
   if (!items.length) return null;
 
-  // Pixels-per-second pacing keeps a long feed feeling consistent. ~80 px/s
-  // is comfortable for reading on a TV at viewing distance.
-  const PX_PER_SEC = 80;
+  // Pixels-per-second pacing keeps a long feed feeling consistent. ~45 px/s
+  // is comfortable for reading on a TV at viewing distance and works on
+  // small landscape-phone screens too.
+  const PX_PER_SEC = 45;
   const durationSec = trackWidth > 0 ? Math.max(20, trackWidth / PX_PER_SEC) : 60;
 
   const joined = items.join("   •   ");
@@ -59,14 +60,17 @@ export default function NewsTicker({ active = true }) {
       className="absolute left-0 right-0 z-30 flex items-stretch overflow-hidden bg-black/55 backdrop-blur-md border-t border-white/10"
       style={{
         bottom: 0,
-        height: "5cqh",
-        minHeight: 36,
+        // Height is intentionally small — just slightly taller than the
+        // text. clamp() picks the larger of the cqh-based size and a
+        // mobile-friendly minimum so the bar stays readable on landscape
+        // phones while still scaling on big TVs.
+        height: "clamp(40px, 5cqh, 70px)",
       }}
     >
       {/* Static "Nyheter fra NRK" label — solid background covers the marquee
           underneath so headlines disappear behind it. */}
       <div
-        className="relative z-10 flex items-center gap-2 px-5 shrink-0 bg-[#D52B1E] text-white shadow-[4px_0_12px_rgba(0,0,0,0.5)]"
+        className="relative z-10 flex items-center gap-2 px-4 sm:px-5 shrink-0 bg-[#D52B1E] text-white shadow-[4px_0_12px_rgba(0,0,0,0.5)]"
         data-testid="news-ticker-label"
       >
         <span
@@ -74,8 +78,11 @@ export default function NewsTicker({ active = true }) {
           aria-hidden="true"
         />
         <span
-          className="font-bold uppercase tracking-[0.18em] whitespace-nowrap"
-          style={{ fontSize: "1.6cqh", letterSpacing: "0.18em" }}
+          className="font-bold uppercase whitespace-nowrap"
+          style={{
+            fontSize: "clamp(12px, 2.3cqh, 22px)",
+            letterSpacing: "0.16em",
+          }}
         >
           Nyheter fra NRK
         </span>
@@ -88,9 +95,9 @@ export default function NewsTicker({ active = true }) {
         className="relative flex-1 overflow-hidden flex items-center"
         style={{
           maskImage:
-            "linear-gradient(to right, black 0, black calc(100% - 80px), transparent)",
+            "linear-gradient(to right, black 0, black calc(100% - 60px), transparent)",
           WebkitMaskImage:
-            "linear-gradient(to right, black 0, black calc(100% - 80px), transparent)",
+            "linear-gradient(to right, black 0, black calc(100% - 60px), transparent)",
         }}
       >
         <div
@@ -101,19 +108,24 @@ export default function NewsTicker({ active = true }) {
             animation: active && trackWidth > 0
               ? `kk-news-marquee ${durationSec}s linear infinite`
               : "none",
-            // Fallback inline keyframes via custom property
             "--kk-news-distance": `${trackWidth}px`,
           }}
         >
           <span
-            className="px-6 text-white/90"
-            style={{ fontSize: "1.7cqh", letterSpacing: "0.01em" }}
+            className="px-5 text-white/95"
+            style={{
+              fontSize: "clamp(15px, 2.8cqh, 28px)",
+              letterSpacing: "0.01em",
+            }}
           >
             {joined}
           </span>
           <span
-            className="px-6 text-white/90"
-            style={{ fontSize: "1.7cqh", letterSpacing: "0.01em" }}
+            className="px-5 text-white/95"
+            style={{
+              fontSize: "clamp(15px, 2.8cqh, 28px)",
+              letterSpacing: "0.01em",
+            }}
             aria-hidden="true"
           >
             {joined}
