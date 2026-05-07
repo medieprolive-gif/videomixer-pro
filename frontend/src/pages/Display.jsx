@@ -325,6 +325,12 @@ export default function Display() {
     if (!state || (!isVideo && !isStream)) return;
     const v = videoRef.current;
     if (!v) return;
+    // While the program overview is up, do NOT touch volume/mute/play —
+    // otherwise the freshly-loaded next video would briefly emit audio
+    // through the overlay before the dedicated overview-pause effect
+    // re-mutes/pauses it. The overview-pause effect (further down) is the
+    // single source of truth for play state in that case.
+    if (showOverviewRef.current) return;
     v.volume = state.volume ?? 1;
     v.muted = !!state.muted;
     v.loop = !!state.loop && !isStream; // looping makes no sense for live streams
@@ -432,29 +438,30 @@ export default function Display() {
 
   const idle = !state?.pgm_id;
 
-  // Is any scheduled item currently within its play window (incl. pre-roll)?
+  // Is any scheduled item currently within its play window?
   // Used by the program-overview overlay so it takes precedence between
   // programs even if the room state still holds a stale pgm_id from earlier
   // playback. When the scheduler is actively running an item we let the video
   // play normally.
+  //
+  // NOTE: We intentionally do NOT include the global pre-roll bumper in the
+  // window — automatic bumpers are disabled to avoid rough transitions.
+  // Only an item's own `pre_plakat_duration` (manual per-item plakat) extends
+  // the window backward.
   //
   // NOTE: Backend marks status="played" the moment it STARTS playing, not when
   // the clip finishes. So we must NOT exclude "played" here — only "cancelled".
   // The active window is determined purely by time vs scheduled_at + duration.
   const isInScheduledWindow = useMemo(() => {
     const ts = now;
-    const globalPre = settings?.global_bumper_id
-      ? (settings.global_bumper_duration || 0) * 1000
-      : 0;
     return (schedule || []).some((s) => {
       if (s.status === "cancelled") return false;
       const start = new Date(s.scheduled_at).getTime();
       const dur = (s.duration_minutes || 15) * 60 * 1000;
       const itemPre = (s.pre_plakat_duration || 0) * 1000;
-      const effectivePre = itemPre > 0 ? itemPre : globalPre;
-      return ts >= start - effectivePre && ts < start + dur;
+      return ts >= start - itemPre && ts < start + dur;
     });
-  }, [schedule, now, settings]);
+  }, [schedule, now]);
 
   // Next scheduled item (upcoming, status=scheduled)
   const nextScheduled = useMemo(() => {

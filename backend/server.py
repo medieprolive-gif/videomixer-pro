@@ -143,25 +143,19 @@ async def scheduler_tick():
     items = await db.schedule.find(
         {"status": "scheduled"}, {"_id": 0}
     ).sort("scheduled_at", 1).to_list(500)
-    settings_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     for item in items:
         s = item["scheduled_at"]
         if isinstance(s, str):
             s = datetime.fromisoformat(s)
         if s.tzinfo is None:
             s = s.replace(tzinfo=timezone.utc)
+        # NOTE: Automatic global bumper fallback is intentionally DISABLED —
+        # it was causing audio leaks and rough transitions out of the program
+        # overview. The room-level `global_bumper_id` UI is kept so the feature
+        # can be re-enabled, but only an explicit per-item `pre_plakat_id`
+        # triggers a pre-roll.
         pre_id = item.get("pre_plakat_id")
         pre_dur = float(item.get("pre_plakat_duration") or 0)
-        if not pre_id or pre_dur <= 0:
-            room = item.get("room") or DEFAULT_ROOM
-            if room not in settings_cache:
-                settings_cache[room] = await db.room_settings.find_one(
-                    {"room": room}, {"_id": 0}
-                )
-            rs = settings_cache[room]
-            if rs and rs.get("global_bumper_id"):
-                pre_id = rs["global_bumper_id"]
-                pre_dur = float(rs.get("global_bumper_duration") or 5.0)
         if pre_id and pre_dur > 0:
             pre_start = s - timedelta(seconds=pre_dur)
             if pre_start <= now < s:
@@ -1469,28 +1463,10 @@ async def websocket_endpoint(ws: WebSocket, room: str = Query(DEFAULT_ROOM)):
                 ended_id = msg.get("video_id") or msg.get("media_id")
                 if ended_id == state.get("pgm_id"):
                     state["is_playing"] = False
-                    # Broadcast playout: if room has a global bumper AND there's a
-                    # next scheduled item, transition to bumper to fill the gap.
-                    rs = await db.room_settings.find_one({"room": room}, {"_id": 0})
-                    if rs and rs.get("global_bumper_id"):
-                        nxt = await db.schedule.find_one(
-                            {"room": room, "status": "scheduled"},
-                            {"_id": 0},
-                            sort=[("scheduled_at", 1)],
-                        )
-                        if nxt:
-                            state["pgm_id"] = rs["global_bumper_id"]
-                            state["pvw_id"] = nxt.get("media_id")
-                            state["is_playing"] = True
-                            state["current_time"] = 0
-                            state["next_up_text"] = nxt.get("title") or ""
-                            # Schedule a transition out of the bumper after its
-                            # configured duration, so the program overview phase
-                            # (or idle) can take over until the next item starts.
-                            bumper_dur = float(rs.get("global_bumper_duration") or 5.0)
-                            asyncio.create_task(
-                                _expire_bumper(room, rs["global_bumper_id"], bumper_dur)
-                            )
+                    # NOTE: Auto bumper-between-programs path is disabled to
+                    # avoid jarring transitions out of the program overview.
+                    # When PGM ends we just stop; the program overview takes
+                    # over until the next scheduled item starts.
 
             await save_state(state, room)
             await broadcast_state(state, room)

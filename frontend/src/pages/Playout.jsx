@@ -1031,9 +1031,15 @@ export default function Playout() {
         </section>
 
         {/* Settings */}
-        <section className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4">
-          <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-3 flex items-center gap-2">
-            <Settings className="w-3 h-3" /> Pre-roll bumper (spilles 5s før hvert program)
+        <section className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4 opacity-60">
+          <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-3 flex items-center gap-2 flex-wrap">
+            <Settings className="w-3 h-3" /> Pre-roll bumper
+            <span className="text-[9px] tracking-[0.25em] text-amber-500/80 border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 rounded">
+              Auto-bumper deaktivert
+            </span>
+            <span className="normal-case tracking-normal text-zinc-600 text-[10px] font-normal">
+              · bruk per-innslag plakat i stedet
+            </span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
             <div className="md:col-span-2">
