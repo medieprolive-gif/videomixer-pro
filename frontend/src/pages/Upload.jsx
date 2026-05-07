@@ -625,6 +625,16 @@ export default function Upload() {
     }
   };
 
+  const renameMedia = async (id, name) => {
+    try {
+      await api.patch(`/videos/${id}/filename`, { filename: name });
+      setVideos((vs) => vs.map((v) => (v.id === id ? { ...v, filename: name } : v)));
+      toast.success("Navn oppdatert");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Klarte ikke oppdatere navn");
+    }
+  };
+
   /**
    * Re-generate a thumbnail for an existing video by streaming it back from the server,
    * grabbing a frame and POSTing it. Useful for items uploaded before the thumbnail
@@ -821,9 +831,26 @@ export default function Upload() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="text-white text-sm truncate">{v.filename}</span>
+                        <input
+                          type="text"
+                          defaultValue={v.filename}
+                          onBlur={(e) => {
+                            const nv = e.target.value.trim();
+                            if (nv && nv !== v.filename) renameMedia(v.id, nv);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.target.blur();
+                            if (e.key === "Escape") {
+                              e.target.value = v.filename;
+                              e.target.blur();
+                            }
+                          }}
+                          data-testid="upload-filename-input"
+                          title="Klikk for å gi nytt navn"
+                          className="text-white text-sm truncate bg-transparent border-0 border-b border-transparent hover:border-white/10 focus:border-[#F59E0B] focus:outline-none px-0 py-0.5 min-w-0 flex-1"
+                        />
                         <span
-                          className={`text-[9px] uppercase tracking-[0.15em] font-mono px-1.5 py-0.5 rounded border ${
+                          className={`text-[9px] uppercase tracking-[0.15em] font-mono px-1.5 py-0.5 rounded border shrink-0 ${
                             isStream
                               ? "text-rose-400 border-rose-400/40 bg-rose-400/5"
                               : isImg

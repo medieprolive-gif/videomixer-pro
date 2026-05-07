@@ -497,6 +497,82 @@ function TimelineGrid({
     onItemMove?.(id, `${date}T${slot.key}`);
   };
 
+  // ---------- Touch drag (mobile) ----------
+  // HTML5 drag/drop doesn't fire on touch devices. We emulate it: a 350ms
+  // long-press on an item enters drag mode (haptic feedback + visual lift),
+  // then finger movement updates dragOverIdx, and lift-off drops onto that
+  // slot. Tap (no long-press) still triggers normal click-to-edit.
+  const touchStateRef = useRef(null);
+  const handleTouchStart = (e, item) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    touchStateRef.current = {
+      itemId: item.id,
+      startX: t.clientX,
+      startY: t.clientY,
+      dragging: false,
+      lastY: t.clientY,
+      timer: setTimeout(() => {
+        // Enter drag mode after long-press
+        if (!touchStateRef.current) return;
+        touchStateRef.current.dragging = true;
+        draggingIdRef.current = item.id;
+        setDraggingId(item.id);
+        try {
+          if (navigator.vibrate) navigator.vibrate(15);
+        } catch (_) {
+          /* noop */
+        }
+      }, 350),
+    };
+  };
+  const handleTouchMove = (e) => {
+    const st = touchStateRef.current;
+    if (!st) return;
+    const t = e.touches[0];
+    const dx = Math.abs(t.clientX - st.startX);
+    const dy = Math.abs(t.clientY - st.startY);
+    // Cancel long-press if user starts scrolling before threshold elapses
+    if (!st.dragging && (dx > 10 || dy > 10)) {
+      clearTimeout(st.timer);
+      touchStateRef.current = null;
+      return;
+    }
+    if (st.dragging) {
+      e.preventDefault(); // prevent page scroll while dragging
+      st.lastY = t.clientY;
+      const idx = slotIndexFromY(t.clientY);
+      if (idx >= 0 && idx < TOTAL_SLOTS && dragOverIdx !== idx) {
+        setDragOverIdx(idx);
+      }
+    }
+  };
+  const handleTouchEnd = (e) => {
+    const st = touchStateRef.current;
+    if (!st) return;
+    clearTimeout(st.timer);
+    if (st.dragging) {
+      const idx = slotIndexFromY(st.lastY);
+      draggingIdRef.current = null;
+      setDraggingId(null);
+      setDragOverIdx(null);
+      if (idx >= 0 && idx < TOTAL_SLOTS) {
+        const slot = slotKeys[idx];
+        onItemMove?.(st.itemId, `${date}T${slot.key}`);
+      }
+      e.preventDefault();
+    }
+    touchStateRef.current = null;
+  };
+  const handleTouchCancel = () => {
+    const st = touchStateRef.current;
+    if (st) clearTimeout(st.timer);
+    touchStateRef.current = null;
+    draggingIdRef.current = null;
+    setDraggingId(null);
+    setDragOverIdx(null);
+  };
+
   return (
     <div
       className="bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden"
@@ -584,7 +660,18 @@ function TimelineGrid({
               draggable
               onDragStart={(e) => handleDragStart(e, it)}
               onDragEnd={handleDragEnd}
-              onClick={() => onItemClick(it)}
+              onTouchStart={(e) => handleTouchStart(e, it)}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchCancel}
+              onClick={(e) => {
+                // Suppress click that fires after touch-drag on mobile
+                if (touchStateRef.current?.dragging) {
+                  e.preventDefault();
+                  return;
+                }
+                onItemClick(it);
+              }}
               data-testid="playout-timeline-item"
               data-time={`${pad(dt.getHours())}:${pad(dt.getMinutes())}`}
               style={{
@@ -594,6 +681,7 @@ function TimelineGrid({
                 right: 8,
                 opacity: isDragging ? 0.35 : 1,
                 pointerEvents: isDragging ? "none" : "auto",
+                touchAction: "none",
               }}
               className={`absolute z-10 cursor-move rounded border px-3 py-2 flex flex-col gap-1 transition-colors overflow-hidden shadow-lg ${
                 isOnAir

@@ -570,6 +570,25 @@ async def update_duration(video_id: str, payload: DurationUpdate, _: bool = Depe
     return {"ok": True, "duration": safe}
 
 
+class FilenamePatch(BaseModel):
+    filename: str
+
+
+@api_router.patch("/videos/{video_id}/filename")
+async def update_filename(video_id: str, payload: FilenamePatch, _: bool = Depends(require_auth)):
+    name = (payload.filename or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Filnavn kan ikke være tomt")
+    if len(name) > 240:
+        raise HTTPException(status_code=400, detail="Filnavn er for langt (maks 240 tegn)")
+    res = await db.videos.update_one(
+        {"id": video_id, "is_deleted": False}, {"$set": {"filename": name}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Media ikke funnet")
+    return {"ok": True, "filename": name}
+
+
 @api_router.get("/videos", response_model=List[VideoOut])
 async def list_videos():
     items = await db.videos.find({"is_deleted": False}, {"_id": 0}).sort("created_at", 1).to_list(1000)
