@@ -60,6 +60,10 @@ export default function Display() {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const hlsRef = useRef(null);
+  // Mirror of showProgramOverview that swap-effect can read without creating
+  // a temporal-dead-zone in the dependency array (showProgramOverview is
+  // declared further down in the component body).
+  const showOverviewRef = useRef(false);
   const [currentSrcId, setCurrentSrcId] = useState(null);
   const [showCursor, setShowCursor] = useState(false);
   const [fs, setFs] = useState(false);
@@ -279,6 +283,15 @@ export default function Display() {
     // Static video file
     v.src = streamUrl(state.pgm_id);
     v.load();
+    if (showOverviewRef.current) {
+      // Don't let autoplay leak audio while overview is up.
+      v.muted = true;
+      try {
+        v.pause();
+      } catch (_) {
+        /* noop */
+      }
+    }
   }, [state?.pgm_id, currentSrcId, isVideo, isStream]);
 
   // Fade out the frozen frame once the new video is ready to render pixels.
@@ -479,13 +492,53 @@ export default function Display() {
   // Program overview: shown full-screen between scheduled items and while idle.
   // Driven by user setting on /playout. Hides when:
   //  - kiosk start overlay is up (initial fullscreen prompt)
-  //  - a scheduled item is currently within its play window (incl. pre-roll)
+  //  - a scheduled item is currently within its play window AND the new
+  //    media has reported it can render its first frame (no black flash)
   //  - the "Next up" overlay is up (so we don't double up text on screen)
   const showProgramOverview =
     !!settings?.program_overview_enabled &&
     !showKioskOverlay &&
     !showNextUp &&
-    !isInScheduledWindow;
+    (!isInScheduledWindow || !mediaReady);
+  showOverviewRef.current = showProgramOverview;
+
+  // Track whether the currently-pointed-to media element is ready to render
+  // its first frame. We use this to hold the program-overview overlay up
+  // until the next clip (video/stream/image) is decoded — that masks the
+  // black "loading" gap between segments and gives broadcast-style cuts.
+  const [mediaReady, setMediaReady] = useState(true);
+
+  // Reset mediaReady whenever PGM source changes; flip back to true when the
+  // new source signals it can render pixels (canplay for video, image onload).
+  useEffect(() => {
+    if (!state?.pgm_id) {
+      setMediaReady(true);
+      return;
+    }
+    if (!isVideo && !isStream && !isImage) {
+      setMediaReady(true);
+      return;
+    }
+    setMediaReady(false);
+    const safety = setTimeout(() => setMediaReady(true), 3000);
+    if (isVideo || isStream) {
+      const v = videoRef.current;
+      if (!v) {
+        setMediaReady(true);
+        return;
+      }
+      const onReady = () => setMediaReady(true);
+      v.addEventListener("canplay", onReady, { once: true });
+      v.addEventListener("loadeddata", onReady, { once: true });
+      return () => {
+        clearTimeout(safety);
+        v.removeEventListener("canplay", onReady);
+        v.removeEventListener("loadeddata", onReady);
+      };
+    }
+    // Images: rely on <img onLoad> via state setter below
+    return () => clearTimeout(safety);
+  }, [state?.pgm_id, isVideo, isStream, isImage]);
 
   // Pause video element while program overview takes over so we don't get
   // background audio leaking through the overlay.
@@ -498,10 +551,12 @@ export default function Display() {
       } catch (_) {
         /* noop */
       }
+      v.muted = true;
     } else if ((isVideo || isStream) && state?.is_playing) {
+      v.muted = !!state?.muted;
       v.play().catch(() => {});
     }
-  }, [showProgramOverview, isVideo, isStream, state?.is_playing]);
+  }, [showProgramOverview, isVideo, isStream, state?.is_playing, state?.muted, state?.pgm_id, mediaReady]);
 
   return (
     <div
@@ -532,6 +587,7 @@ export default function Display() {
           }`}
           playsInline
           autoPlay
+          preload="auto"
         />
 
         {/* Crossfade snapshot — shows last frame of outgoing video until the
@@ -555,6 +611,7 @@ export default function Display() {
           data-testid="display-image"
           src={isImage && pgm ? thumbUrl(pgm.id) : ""}
           alt={pgm?.filename || ""}
+          onLoad={() => isImage && setMediaReady(true)}
           className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${
             isImage && pgm && !showProgramOverview ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
