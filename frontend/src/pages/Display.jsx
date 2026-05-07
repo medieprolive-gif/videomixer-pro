@@ -496,6 +496,12 @@ export default function Display() {
   const showScheduleTicker =
     !!nextScheduledLabel && !showNextUp && !showKioskOverlay;
 
+  // Track whether the currently-pointed-to media element is ready to render
+  // its first frame. We use this to hold the program-overview overlay up
+  // until the next clip (video/stream/image) is decoded — that masks the
+  // black "loading" gap between segments and gives broadcast-style cuts.
+  const [mediaReady, setMediaReady] = useState(true);
+
   // Program overview: shown full-screen between scheduled items and while idle.
   // Driven by user setting on /playout. Hides when:
   //  - kiosk start overlay is up (initial fullscreen prompt)
@@ -508,12 +514,6 @@ export default function Display() {
     !showNextUp &&
     (!isInScheduledWindow || !mediaReady);
   showOverviewRef.current = showProgramOverview;
-
-  // Track whether the currently-pointed-to media element is ready to render
-  // its first frame. We use this to hold the program-overview overlay up
-  // until the next clip (video/stream/image) is decoded — that masks the
-  // black "loading" gap between segments and gives broadcast-style cuts.
-  const [mediaReady, setMediaReady] = useState(true);
 
   // Reset mediaReady whenever PGM source changes; flip back to true when the
   // new source signals it can render pixels (canplay for video, image onload).
