@@ -826,6 +826,19 @@ export default function Playout() {
   }, [loadAll]);
 
   const images = useMemo(() => media.filter((m) => m.media_type === "image"), [media]);
+  // Library of "asset" media used as bumper / logo / background. Audio is
+  // implicitly always asset-like (no need to require category=asset).
+  const assetMedia = useMemo(
+    () =>
+      media.filter(
+        (m) => m.category === "asset" || m.media_type === "audio"
+      ),
+    [media]
+  );
+  const assetMusic = useMemo(
+    () => media.filter((m) => m.media_type === "audio"),
+    [media]
+  );
 
   const saveSettings = async () => {
     try {
