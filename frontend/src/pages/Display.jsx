@@ -512,7 +512,12 @@ export default function Display() {
     !!settings?.program_overview_enabled &&
     !showKioskOverlay &&
     !showNextUp &&
-    (!isInScheduledWindow || !mediaReady);
+    // Hold the overview up until we ACTUALLY have playable media on screen.
+    // Three guards: (1) no scheduled item is in its window yet, (2) the
+    // backend hasn't pushed the new pgm_id (state.pgm_id null), or (3) the
+    // media element has not signalled it can render its first frame. This
+    // eliminates the black gap between overview-hides and video-shows.
+    (!isInScheduledWindow || !state?.pgm_id || !mediaReady);
   showOverviewRef.current = showProgramOverview;
 
   // Reset mediaReady whenever PGM source changes; flip back to true when the
@@ -674,6 +679,7 @@ export default function Display() {
         >
           {settings?.program_overview_enabled && (
             <ProgramOverview
+              active={showProgramOverview}
               settings={settings}
               schedule={schedule}
               media={media}

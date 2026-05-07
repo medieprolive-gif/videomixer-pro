@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { thumbUrl, streamUrl } from "../lib/api";
 
 const WEEKDAYS_NB = [
@@ -39,13 +39,33 @@ function formatNorwegianDate(d) {
  * when enabled in room settings. Content is sized in cqh/cqw (container query
  * units) so the same layout works at any viewport/screen size.
  */
-export default function ProgramOverview({ settings, schedule, media, roomId }) {
+export default function ProgramOverview({ active = true, settings, schedule, media, roomId }) {
   const [now, setNow] = useState(new Date());
+  const audioRef = useRef(null);
 
   useEffect(() => {
     const i = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(i);
   }, []);
+
+  // Pause/resume the looped background music when overlay activity changes
+  // (opacity:0 alone does NOT stop <audio> playback, which would leak music
+  // into the actual program). We don't reset currentTime so the music feels
+  // continuous across multiple appearances of the overview.
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (active) {
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+    } else {
+      try {
+        a.pause();
+      } catch (_) {
+        /* noop */
+      }
+    }
+  }, [active]);
 
   const textColor = settings?.program_overview_text_color || "#FFFFFF";
   const logoId = settings?.program_overview_logo_id;
@@ -59,7 +79,15 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
   const upcoming = useMemo(() => {
     const ts = now.getTime();
     return (schedule || [])
-      .filter((s) => s.status === "scheduled" && new Date(s.scheduled_at).getTime() > ts)
+      .filter((s) => {
+        if (s.status === "cancelled") return false;
+        const start = new Date(s.scheduled_at).getTime();
+        const dur = (s.duration_minutes || 15) * 60 * 1000;
+        // Keep an item visible until its END time, not its start time.
+        // Otherwise the item that just started disappears from the list a
+        // few seconds before the actual program takes over the screen.
+        return start + dur > ts;
+      })
       .sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
   }, [schedule, now]);
 
@@ -100,16 +128,18 @@ export default function ProgramOverview({ settings, schedule, media, roomId }) {
       }}
     >
       {/* Looping background music — only present when overview is rendered.
-          Volume controlled via room settings, looped indefinitely. */}
+          Volume controlled via room settings, looped indefinitely. The
+          parent `active` prop drives play/pause via useEffect above so the
+          music doesn't leak into the actual program once the overlay fades. */}
       {musicId && (
         <audio
           key={musicId}
-          src={streamUrl(musicId)}
-          autoPlay
-          loop
           ref={(el) => {
+            audioRef.current = el;
             if (el) el.volume = Math.max(0, Math.min(1, musicVolume));
           }}
+          src={streamUrl(musicId)}
+          loop
           data-testid="program-overview-music"
         />
       )}
