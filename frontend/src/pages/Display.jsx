@@ -424,13 +424,17 @@ export default function Display() {
   // programs even if the room state still holds a stale pgm_id from earlier
   // playback. When the scheduler is actively running an item we let the video
   // play normally.
+  //
+  // NOTE: Backend marks status="played" the moment it STARTS playing, not when
+  // the clip finishes. So we must NOT exclude "played" here — only "cancelled".
+  // The active window is determined purely by time vs scheduled_at + duration.
   const isInScheduledWindow = useMemo(() => {
     const ts = now;
     const globalPre = settings?.global_bumper_id
       ? (settings.global_bumper_duration || 0) * 1000
       : 0;
     return (schedule || []).some((s) => {
-      if (s.status === "played" || s.status === "cancelled") return false;
+      if (s.status === "cancelled") return false;
       const start = new Date(s.scheduled_at).getTime();
       const dur = (s.duration_minutes || 15) * 60 * 1000;
       const itemPre = (s.pre_plakat_duration || 0) * 1000;
