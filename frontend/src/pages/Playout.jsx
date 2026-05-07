@@ -116,6 +116,7 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
 
   const videos = useMemo(() => media.filter((m) => m.media_type === "video"), [media]);
   const images = useMemo(() => media.filter((m) => m.media_type === "image"), [media]);
+  const streams = useMemo(() => media.filter((m) => m.media_type === "stream"), [media]);
 
   const save = async () => {
     if (!draft.scheduled_at || !draft.media_id) {
@@ -248,6 +249,7 @@ function ItemModal({ mode, item, initialTime, media, roomId, onClose, onSaved })
                 <option value="">— Velg —</option>
                 {videos.length > 0 && <optgroup label="Video">{videos.map((m) => <option key={m.id} value={m.id}>{m.filename}</option>)}</optgroup>}
                 {images.length > 0 && <optgroup label="Bilde">{images.map((m) => <option key={m.id} value={m.id}>{m.filename}</option>)}</optgroup>}
+                {streams.length > 0 && <optgroup label="Direktestrøm">{streams.map((m) => <option key={m.id} value={m.id}>{`${m.stream_protocol?.toUpperCase() || "STRØM"} · ${m.filename}`}</option>)}</optgroup>}
               </select>
             </div>
             <div>
@@ -619,6 +621,8 @@ function TimelineGrid({
                     />
                   ) : mediaItem?.media_type === "image" ? (
                     <ImageIcon className="w-3 h-3 text-[#F59E0B]" />
+                  ) : mediaItem?.media_type === "stream" ? (
+                    <Radio className="w-3 h-3 text-rose-400" />
                   ) : (
                     <Film className="w-3 h-3 text-zinc-500" />
                   )}

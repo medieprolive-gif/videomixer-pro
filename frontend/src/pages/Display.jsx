@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import { Film, Maximize2 } from "lucide-react";
+import Hls from "hls.js";
 import { useSync } from "../lib/useSync";
-import { api, streamUrl, thumbUrl } from "../lib/api";
+import { api, streamUrl, thumbUrl, API } from "../lib/api";
 import ProgramOverview from "../components/ProgramOverview";
 
 function isFullscreen() {
@@ -58,6 +59,7 @@ export default function Display() {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
+  const hlsRef = useRef(null);
   const [currentSrcId, setCurrentSrcId] = useState(null);
   const [showCursor, setShowCursor] = useState(false);
   const [fs, setFs] = useState(false);
@@ -126,6 +128,7 @@ export default function Display() {
   );
   const isVideo = pgm?.media_type === "video";
   const isImage = pgm?.media_type === "image";
+  const isStream = pgm?.media_type === "stream";
 
   // Track fullscreen changes
   useEffect(() => {
@@ -188,7 +191,7 @@ export default function Display() {
   // overlay, giving a broadcast-style crossfade instead of a black drop while
   // the new source loads.
   useEffect(() => {
-    if (!isVideo) return;
+    if (!isVideo && !isStream) return;
     const v = videoRef.current;
     if (!v) return;
     if (state?.pgm_id === currentSrcId) return;
@@ -210,14 +213,73 @@ export default function Display() {
     }
 
     setCurrentSrcId(state?.pgm_id);
-    if (state?.pgm_id) {
-      v.src = streamUrl(state.pgm_id);
-      v.load();
-    } else {
+
+    // Tear down previous hls.js instance if any
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.destroy();
+      } catch (_) {
+        /* noop */
+      }
+      hlsRef.current = null;
+    }
+
+    if (!state?.pgm_id) {
       v.removeAttribute("src");
       v.load();
+      return;
     }
-  }, [state?.pgm_id, currentSrcId, isVideo]);
+
+    if (isStream) {
+      // Live stream: ask backend to start the ffmpeg→HLS pipeline, then play
+      // the manifest via hls.js (or natively in Safari).
+      let cancelled = false;
+      (async () => {
+        try {
+          await api.post(`/streams/${state.pgm_id}/start`);
+        } catch (e) {
+          // Backend will reject if not auth'd from display tab, but tab will
+          // still be able to read the manifest if another tab started it.
+        }
+        if (cancelled) return;
+        const manifest = `${API}/streams/${state.pgm_id}/hls/stream.m3u8`;
+        if (Hls.isSupported()) {
+          const hls = new Hls({ liveDurationInfinity: true, lowLatencyMode: true });
+          hlsRef.current = hls;
+          hls.attachMedia(v);
+          hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+            // Retry loadSource a few times until ffmpeg has emitted the first
+            // segments; the manifest 404s briefly during startup.
+            let attempts = 0;
+            const tryLoad = () => {
+              attempts += 1;
+              hls.loadSource(manifest);
+            };
+            tryLoad();
+            hls.on(Hls.Events.ERROR, (_evt, data) => {
+              if (
+                data.fatal &&
+                data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+                attempts < 8
+              ) {
+                setTimeout(tryLoad, 1500);
+              }
+            });
+          });
+        } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+          v.src = manifest;
+          v.load();
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Static video file
+    v.src = streamUrl(state.pgm_id);
+    v.load();
+  }, [state?.pgm_id, currentSrcId, isVideo, isStream]);
 
   // Fade out the frozen frame once the new video is ready to render pixels.
   useEffect(() => {
@@ -239,21 +301,40 @@ export default function Display() {
   }, [frozenFrame]);
 
   // Apply playback state to <video>
+  // The backend's `state.current_time` only changes on explicit seeks (or
+  // when a new item starts). The Display does NOT push timeupdate → backend.
+  // We must therefore track the LAST APPLIED time so that recurring state
+  // broadcasts (e.g. scheduler ticks every 2s) don't keep snapping the video
+  // back to a stale cached time and cause apparent freezes / restarts.
+  const lastAppliedTimeRef = useRef(null);
+  const lastAppliedSrcIdRef = useRef(null);
   useEffect(() => {
-    if (!state || !isVideo) return;
+    if (!state || (!isVideo && !isStream)) return;
     const v = videoRef.current;
     if (!v) return;
     v.volume = state.volume ?? 1;
     v.muted = !!state.muted;
-    v.loop = !!state.loop;
+    v.loop = !!state.loop && !isStream; // looping makes no sense for live streams
 
-    if (typeof state.current_time === "number") {
-      const drift = Math.abs(v.currentTime - state.current_time);
-      if (drift > 1.0) {
-        try {
-          v.currentTime = state.current_time;
-        } catch (_) {
-          /* noop */
+    // Reset the cached "last applied time" when the underlying source changes
+    // so that the new item's initial seek (typically to 0) is honoured.
+    if (lastAppliedSrcIdRef.current !== state.pgm_id) {
+      lastAppliedSrcIdRef.current = state.pgm_id;
+      lastAppliedTimeRef.current = null;
+    }
+
+    if (typeof state.current_time === "number" && !isStream) {
+      // Only seek when the backend-driven time has actually changed (i.e.
+      // an operator seeked from /control or a new item started).
+      if (lastAppliedTimeRef.current !== state.current_time) {
+        lastAppliedTimeRef.current = state.current_time;
+        const drift = Math.abs(v.currentTime - state.current_time);
+        if (drift > 1.0) {
+          try {
+            v.currentTime = state.current_time;
+          } catch (_) {
+            /* noop */
+          }
         }
       }
     }
@@ -264,7 +345,7 @@ export default function Display() {
     } else {
       v.pause();
     }
-  }, [state, isVideo]);
+  }, [state, isVideo, isStream]);
 
   // Video ended -> notify backend (freezes on last frame, no auto-advance)
   useEffect(() => {
@@ -413,10 +494,10 @@ export default function Display() {
       } catch (_) {
         /* noop */
       }
-    } else if (isVideo && state?.is_playing) {
+    } else if ((isVideo || isStream) && state?.is_playing) {
       v.play().catch(() => {});
     }
-  }, [showProgramOverview, isVideo, state?.is_playing]);
+  }, [showProgramOverview, isVideo, isStream, state?.is_playing]);
 
   return (
     <div
@@ -441,7 +522,9 @@ export default function Display() {
           ref={videoRef}
           data-testid="display-video"
           className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${
-            isVideo && !showProgramOverview ? "opacity-100" : "opacity-0 pointer-events-none"
+            (isVideo || isStream) && !showProgramOverview
+              ? "opacity-100"
+              : "opacity-0 pointer-events-none"
           }`}
           playsInline
           autoPlay

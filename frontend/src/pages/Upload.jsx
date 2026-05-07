@@ -14,6 +14,8 @@ import {
   LogOut as LogOutIcon,
   Undo2,
   Eraser,
+  Radio,
+  Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, authHeaders, API, clearToken, thumbUrl, streamUrl } from "../lib/api";
@@ -524,6 +526,7 @@ export default function Upload() {
   const [progress, setProgress] = useState(0);
   const [currentName, setCurrentName] = useState("");
   const [trimming, setTrimming] = useState(null);
+  const [streamModal, setStreamModal] = useState(null);
   const inputRef = useRef(null);
   const navigate = useNavigate();
 
@@ -745,6 +748,35 @@ export default function Upload() {
           />
         </div>
 
+        {/* Add live stream */}
+        <div className="mt-6 flex items-center justify-between gap-4 bg-[#0A0A0A] border border-white/10 rounded-lg px-5 py-4">
+          <div>
+            <div className="flex items-center gap-2 text-white">
+              <Radio className="w-4 h-4 text-[#F59E0B]" />
+              <span className="text-sm font-semibold">Direkte­strøm (SRT / RTMP)</span>
+            </div>
+            <div className="text-xs text-zinc-500 mt-1">
+              Legg til en SRT- eller RTMP-kilde. KinoKontroll henter den med ffmpeg
+              og pakker om til HLS for avspilling i nettleser.
+            </div>
+          </div>
+          <button
+            onClick={() =>
+              setStreamModal({
+                name: "",
+                stream_url: "",
+                stream_protocol: "srt",
+                stream_mode: "caller",
+              })
+            }
+            data-testid="upload-add-stream-button"
+            className="inline-flex items-center gap-2 bg-[#F59E0B]/10 border border-[#F59E0B]/40 hover:bg-[#F59E0B]/20 text-[#F59E0B] px-4 py-2 rounded-md text-sm uppercase tracking-[0.15em] transition-colors shrink-0"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Legg til strøm
+          </button>
+        </div>
+
         {/* List */}
         <div className="mt-12">
           <div className="flex items-center justify-between mb-4">
@@ -764,6 +796,7 @@ export default function Upload() {
             <ul className="divide-y divide-white/5 bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden">
               {videos.map((v) => {
                 const isImg = v.media_type === "image";
+                const isStream = v.media_type === "stream";
                 return (
                   <li
                     key={v.id}
@@ -780,6 +813,8 @@ export default function Upload() {
                         />
                       ) : isImg ? (
                         <ImageIcon className="w-4 h-4 text-[#F59E0B]" />
+                      ) : isStream ? (
+                        <Radio className="w-4 h-4 text-rose-400" />
                       ) : (
                         <Film className="w-4 h-4 text-[#F59E0B]" />
                       )}
@@ -789,16 +824,20 @@ export default function Upload() {
                         <span className="text-white text-sm truncate">{v.filename}</span>
                         <span
                           className={`text-[9px] uppercase tracking-[0.15em] font-mono px-1.5 py-0.5 rounded border ${
-                            isImg
+                            isStream
+                              ? "text-rose-400 border-rose-400/40 bg-rose-400/5"
+                              : isImg
                               ? "text-[#F59E0B] border-[#F59E0B]/40 bg-[#F59E0B]/5"
                               : "text-zinc-500 border-white/10"
                           }`}
                         >
-                          {isImg ? "BILDE" : "VIDEO"}
+                          {isStream ? `STRØM · ${(v.stream_protocol || "").toUpperCase()}` : isImg ? "BILDE" : "VIDEO"}
                         </span>
                       </div>
-                      <div className="text-xs text-zinc-600 font-mono">
-                        {formatSize(v.size)} · {(v.content_type || "").replace(/^(video|image)\//, "")}
+                      <div className="text-xs text-zinc-600 font-mono truncate">
+                        {isStream
+                          ? v.stream_url
+                          : `${formatSize(v.size)} · ${(v.content_type || "").replace(/^(video|image)\//, "")}`}
                       </div>
                     </div>
 
@@ -825,7 +864,7 @@ export default function Upload() {
                       </div>
                     )}
 
-                    {!isImg && !v.has_thumbnail && (
+                    {!isImg && !isStream && !v.has_thumbnail && (
                       <button
                         onClick={() => regenerateThumb(v)}
                         data-testid="upload-regenerate-thumb-button"
@@ -836,7 +875,7 @@ export default function Upload() {
                       </button>
                     )}
 
-                    {!isImg && (
+                    {!isImg && !isStream && (
                       <button
                         onClick={() => setTrimming(v)}
                         data-testid="upload-trim-button"
@@ -882,6 +921,180 @@ export default function Upload() {
           onSaved={load}
         />
       )}
+
+      {streamModal && (
+        <StreamModal
+          draft={streamModal}
+          setDraft={setStreamModal}
+          onClose={() => setStreamModal(null)}
+          onSaved={() => {
+            setStreamModal(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function StreamModal({ draft, setDraft, onClose, onSaved }) {
+  const [saving, setSaving] = useState(false);
+  const valid = draft.name.trim() && draft.stream_url.trim();
+
+  const save = async () => {
+    if (!valid) return;
+    setSaving(true);
+    try {
+      await api.post("/streams", {
+        name: draft.name.trim(),
+        stream_url: draft.stream_url.trim(),
+        stream_protocol: draft.stream_protocol,
+        stream_mode: draft.stream_mode,
+      });
+      toast.success("Strøm lagret");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Kunne ikke lagre strøm");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+      data-testid="upload-stream-modal"
+    >
+      <div className="w-full max-w-lg bg-[#0A0A0A] border border-white/10 rounded-lg overflow-hidden shadow-2xl">
+        <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Radio className="w-4 h-4 text-[#F59E0B]" />
+            <h3 className="text-white text-sm uppercase tracking-[0.2em] font-semibold">
+              Ny direktestrøm
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            data-testid="upload-stream-close"
+            className="text-zinc-500 hover:text-white p-1.5 rounded hover:bg-white/5"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+              Navn
+            </label>
+            <input
+              type="text"
+              autoFocus
+              placeholder="F.eks. Live fra storsalen"
+              value={draft.name}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              data-testid="upload-stream-name"
+              className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-[#F59E0B]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+              Protokoll
+            </label>
+            <div className="flex gap-2">
+              {[
+                { v: "srt", l: "SRT" },
+                { v: "rtmp", l: "RTMP" },
+              ].map((p) => (
+                <button
+                  key={p.v}
+                  type="button"
+                  onClick={() => setDraft({ ...draft, stream_protocol: p.v })}
+                  data-testid={`upload-stream-proto-${p.v}`}
+                  className={`flex-1 text-sm uppercase tracking-[0.15em] px-3 py-2 border rounded transition-colors ${
+                    draft.stream_protocol === p.v
+                      ? "border-[#F59E0B]/60 text-[#F59E0B] bg-[#F59E0B]/10"
+                      : "border-white/10 text-zinc-400 hover:text-white hover:border-white/30"
+                  }`}
+                >
+                  {p.l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {draft.stream_protocol === "srt" && (
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                SRT-modus
+              </label>
+              <div className="flex gap-2">
+                {[
+                  { v: "caller", l: "Caller (henter)" },
+                  { v: "listener", l: "Listener (mottar)" },
+                ].map((m) => (
+                  <button
+                    key={m.v}
+                    type="button"
+                    onClick={() => setDraft({ ...draft, stream_mode: m.v })}
+                    data-testid={`upload-stream-mode-${m.v}`}
+                    className={`flex-1 text-xs uppercase tracking-[0.15em] px-3 py-2 border rounded transition-colors ${
+                      draft.stream_mode === m.v
+                        ? "border-[#F59E0B]/60 text-[#F59E0B] bg-[#F59E0B]/10"
+                        : "border-white/10 text-zinc-400 hover:text-white hover:border-white/30"
+                    }`}
+                  >
+                    {m.l}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+              URL
+            </label>
+            <input
+              type="text"
+              placeholder={
+                draft.stream_protocol === "srt"
+                  ? "srt://server.example.com:9999?streamid=live"
+                  : "rtmp://server.example.com/live/streamkey"
+              }
+              value={draft.stream_url}
+              onChange={(e) => setDraft({ ...draft, stream_url: e.target.value })}
+              data-testid="upload-stream-url"
+              className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
+            />
+            <p className="text-[10px] text-zinc-600 mt-1.5 leading-relaxed">
+              Backend henter strømmen via ffmpeg ved playout-tidspunkt og
+              transcoder til HLS for avspilling i visningsappen. Ekstraparametere
+              (latency, passphrase, streamid) kan legges til som query-string.
+            </p>
+          </div>
+        </div>
+
+        <div className="px-5 py-3 border-t border-white/5 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            data-testid="upload-stream-cancel"
+            className="px-4 py-2 text-xs uppercase tracking-[0.2em] text-zinc-400 hover:text-white rounded transition-colors"
+          >
+            Avbryt
+          </button>
+          <button
+            onClick={save}
+            disabled={!valid || saving}
+            data-testid="upload-stream-save"
+            className="inline-flex items-center gap-2 bg-[#F59E0B]/10 border border-[#F59E0B]/40 hover:bg-[#F59E0B]/20 text-[#F59E0B] px-4 py-2 rounded-md text-xs uppercase tracking-[0.2em] transition-colors disabled:opacity-40"
+          >
+            {saving ? "Lagrer..." : "Lagre strøm"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

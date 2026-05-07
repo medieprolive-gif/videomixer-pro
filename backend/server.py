@@ -1,10 +1,11 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Header, Query, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import time
 import logging
 import subprocess
 import tempfile
@@ -214,11 +215,23 @@ async def lifespan(_app: FastAPI):
     await get_state_doc(DEFAULT_ROOM)
 
     sched_task = asyncio.create_task(scheduler_loop())
+    streams_task = asyncio.create_task(streams_idle_cleanup_loop())
     logger.info("Broadcast scheduler started")
     yield
     sched_task.cancel()
+    streams_task.cancel()
+    # Stop any active stream transcoders
+    for sid in list(_active_streams.keys()):
+        try:
+            await _stop_stream_locked(sid)
+        except Exception:
+            pass
     try:
         await sched_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await streams_task
     except asyncio.CancelledError:
         pass
     client.close()
@@ -275,18 +288,29 @@ async def verify(_: bool = Depends(require_auth)):
 
 # ---------- Media models ----------
 class VideoOut(BaseModel):
-    """Represents a media item (video or image)."""
+    """Represents a media item (video, image, or live stream)."""
 
     model_config = ConfigDict(extra="ignore")
     id: str
     filename: str
-    storage_path: str
-    content_type: str
-    size: int
+    storage_path: str = ""  # empty for streams
+    content_type: str = ""
+    size: int = 0
     created_at: str
     has_thumbnail: bool = False
-    media_type: str = "video"  # "video" | "image"
+    media_type: str = "video"  # "video" | "image" | "stream"
     duration: float = 5.0  # only meaningful for images (seconds)
+    # Live-stream fields (only when media_type == "stream")
+    stream_url: Optional[str] = None
+    stream_protocol: Optional[str] = None  # "srt" | "rtmp"
+    stream_mode: Optional[str] = None  # "caller" | "listener" (SRT only)
+
+
+class StreamCreate(BaseModel):
+    name: str
+    stream_url: str
+    stream_protocol: str  # "srt" | "rtmp"
+    stream_mode: Optional[str] = "caller"
 
 
 VIDEO_EXTS = {"mp4", "webm", "mov", "mkv", "avi", "ogg"}
@@ -941,6 +965,223 @@ def _serialize_schedule(item: Dict[str, Any]) -> Dict[str, Any]:
             s = s.replace(tzinfo=timezone.utc)
         out["scheduled_at"] = s.isoformat()
     return out
+
+
+# ---------- Live streams (SRT/RTMP → HLS via ffmpeg) ----------
+STREAMS_ROOT = Path("/tmp/kk_streams")
+STREAMS_ROOT.mkdir(parents=True, exist_ok=True)
+# In-process registry of running ffmpeg transcoders.
+# Shape: {media_id: {"proc": Popen, "dir": Path, "last_access": float}}
+_active_streams: Dict[str, Dict[str, Any]] = {}
+_streams_lock = asyncio.Lock()
+
+
+def _stream_input_args(record: Dict[str, Any]) -> List[str]:
+    url = record.get("stream_url") or ""
+    proto = (record.get("stream_protocol") or "").lower()
+    if proto == "srt":
+        mode = (record.get("stream_mode") or "caller").lower()
+        # Append mode= parameter if not already present.
+        if "mode=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}mode={mode}"
+        return ["-f", "mpegts", "-i", url]
+    return ["-i", url]
+
+
+def _spawn_ffmpeg_for_stream(media_id: str, record: Dict[str, Any]) -> Path:
+    """Start an ffmpeg process that pulls the SRT/RTMP source and writes HLS
+    segments to /tmp/kk_streams/{media_id}/. Returns the output directory."""
+    out_dir = STREAMS_ROOT / media_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Clean any stale segments
+    for f in out_dir.glob("*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-fflags",
+        "+nobuffer",
+        "-rw_timeout",
+        "5000000",
+        *_stream_input_args(record),
+        # Re-encode to broadly compatible H.264 + AAC for hls.js.
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-tune",
+        "zerolatency",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-b:a",
+        "128k",
+        "-f",
+        "hls",
+        "-hls_time",
+        "2",
+        "-hls_list_size",
+        "6",
+        "-hls_flags",
+        "delete_segments+omit_endlist+independent_segments",
+        "-hls_segment_filename",
+        str(out_dir / "seg_%05d.ts"),
+        str(out_dir / "stream.m3u8"),
+    ]
+    logger.info("Starting ffmpeg for stream %s: %s", media_id, " ".join(cmd))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    return out_dir, proc
+
+
+async def _stop_stream_locked(media_id: str):
+    info = _active_streams.pop(media_id, None)
+    if not info:
+        return
+    proc = info.get("proc")
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+            await asyncio.to_thread(proc.wait, 5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    out_dir = info.get("dir")
+    if out_dir and isinstance(out_dir, Path):
+        for f in out_dir.glob("*"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        try:
+            out_dir.rmdir()
+        except Exception:
+            pass
+
+
+async def streams_idle_cleanup_loop():
+    """Periodically stop transcoders that haven't been accessed recently."""
+    IDLE_AFTER = 60  # seconds
+    while True:
+        try:
+            await asyncio.sleep(15)
+            now = time.time()
+            stale = []
+            async with _streams_lock:
+                for sid, info in list(_active_streams.items()):
+                    if now - info.get("last_access", now) > IDLE_AFTER:
+                        stale.append(sid)
+                for sid in stale:
+                    await _stop_stream_locked(sid)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("streams cleanup failed")
+
+
+@api_router.post("/streams", response_model=VideoOut)
+async def create_stream(payload: StreamCreate, _: bool = Depends(require_auth)):
+    proto = payload.stream_protocol.lower()
+    if proto not in ("srt", "rtmp"):
+        raise HTTPException(status_code=400, detail="Protokoll må være srt eller rtmp")
+    if proto == "srt" and (payload.stream_mode or "caller").lower() not in ("caller", "listener"):
+        raise HTTPException(status_code=400, detail="SRT-modus må være caller eller listener")
+    media_id = str(uuid.uuid4())
+    doc = {
+        "id": media_id,
+        "filename": payload.name or f"Strøm ({proto.upper()})",
+        "storage_path": "",
+        "content_type": "application/vnd.apple.mpegurl",
+        "size": 0,
+        "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "media_type": "stream",
+        "duration": 0.0,
+        "stream_url": payload.stream_url,
+        "stream_protocol": proto,
+        "stream_mode": (payload.stream_mode or "caller").lower() if proto == "srt" else None,
+    }
+    await db.videos.insert_one(doc.copy())
+    doc["has_thumbnail"] = False
+    return VideoOut(**doc)
+
+
+@api_router.post("/streams/{media_id}/start")
+async def start_stream(media_id: str, _: bool = Depends(require_auth)):
+    record = await db.videos.find_one(
+        {"id": media_id, "is_deleted": False, "media_type": "stream"}, {"_id": 0}
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Strøm ikke funnet")
+    async with _streams_lock:
+        existing = _active_streams.get(media_id)
+        if existing and existing["proc"].poll() is None:
+            existing["last_access"] = time.time()
+            return {
+                "ok": True,
+                "manifest": f"/api/streams/{media_id}/hls/stream.m3u8",
+                "started": False,
+            }
+        # Stop dead one if any
+        if existing:
+            await _stop_stream_locked(media_id)
+        out_dir, proc = await asyncio.to_thread(_spawn_ffmpeg_for_stream, media_id, record)
+        _active_streams[media_id] = {
+            "proc": proc,
+            "dir": out_dir,
+            "last_access": time.time(),
+        }
+    return {
+        "ok": True,
+        "manifest": f"/api/streams/{media_id}/hls/stream.m3u8",
+        "started": True,
+    }
+
+
+@api_router.post("/streams/{media_id}/stop")
+async def stop_stream(media_id: str, _: bool = Depends(require_auth)):
+    async with _streams_lock:
+        await _stop_stream_locked(media_id)
+    return {"ok": True}
+
+
+@api_router.get("/streams/{media_id}/hls/{filename}")
+async def serve_hls(media_id: str, filename: str):
+    # Light validation to keep this endpoint scoped to its directory.
+    if "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Ugyldig filnavn")
+    info = _active_streams.get(media_id)
+    if info:
+        info["last_access"] = time.time()
+    file_path = STREAMS_ROOT / media_id / filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Segment ikke klart ennå")
+    if filename.endswith(".m3u8"):
+        media_type = "application/vnd.apple.mpegurl"
+    elif filename.endswith(".ts"):
+        media_type = "video/mp2t"
+    else:
+        media_type = "application/octet-stream"
+    headers = {
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*",
+    }
+    return FileResponse(file_path, media_type=media_type, headers=headers)
 
 
 @api_router.get("/schedule", response_model=List[ScheduleOut])
