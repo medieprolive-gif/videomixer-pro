@@ -236,14 +236,22 @@ export default function Display() {
 
     if (isStream) {
       // Live stream: ask backend to start the ffmpeg→HLS pipeline, then play
-      // the manifest via hls.js (or natively in Safari).
+      // the manifest via hls.js (or natively in Safari). We MUST start muted
+      // — browsers block autoplay-with-sound without user gesture, and the
+      // result is the native play-button overlay instead of a live picture.
+      // Once the first frame is rendered, the apply-state effect re-syncs
+      // mute from the global state.
+      v.muted = true;
       let cancelled = false;
       (async () => {
         try {
           await api.post(`/streams/${state.pgm_id}/start`);
         } catch (e) {
-          // Backend will reject if not auth'd from display tab, but tab will
-          // still be able to read the manifest if another tab started it.
+          // Endpoint is public, so failure here means a network or backend
+          // issue — log so we can debug. The manifest fetch below will also
+          // fail and hls.js will retry.
+          // eslint-disable-next-line no-console
+          console.warn("stream start failed", e?.message || e);
         }
         if (cancelled) return;
         const manifest = `${API}/streams/${state.pgm_id}/hls/stream.m3u8`;
@@ -264,15 +272,24 @@ export default function Display() {
               if (
                 data.fatal &&
                 data.type === Hls.ErrorTypes.NETWORK_ERROR &&
-                attempts < 8
+                attempts < 12
               ) {
                 setTimeout(tryLoad, 1500);
               }
             });
           });
+          // Once we have a manifest parsed, force a play() — autoplay
+          // attribute may have been suppressed by earlier muted-pause
+          // logic, and hls.js doesn't auto-start playback.
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            const p = v.play();
+            if (p && p.catch) p.catch(() => {});
+          });
         } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
           v.src = manifest;
           v.load();
+          const p = v.play();
+          if (p && p.catch) p.catch(() => {});
         }
       })();
       return () => {

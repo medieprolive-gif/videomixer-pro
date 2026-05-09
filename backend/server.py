@@ -1182,7 +1182,12 @@ async def create_stream(payload: StreamCreate, _: bool = Depends(require_auth)):
 
 
 @api_router.post("/streams/{media_id}/start")
-async def start_stream(media_id: str, _: bool = Depends(require_auth)):
+async def start_stream(media_id: str):
+    # Public endpoint — `/display` is public and needs to be able to spin up
+    # the ffmpeg→HLS pipeline without a token. The HLS segment endpoint is
+    # already public; locking just the start call would only break public
+    # display tabs while providing no real security (anyone who can hit the
+    # manifest can hit the start).
     record = await db.videos.find_one(
         {"id": media_id, "is_deleted": False, "media_type": "stream"}, {"_id": 0}
     )
