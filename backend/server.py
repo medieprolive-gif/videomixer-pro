@@ -1045,6 +1045,16 @@ def _stream_input_args(record: Dict[str, Any]) -> List[str]:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}mode={mode}"
         return ["-f", "mpegts", "-i", url]
+    if proto == "rtmp":
+        # `rtmp_live=live` tells ffmpeg the source is a live publish and not
+        # a VOD recording — without it some RTMP servers drop the consumer
+        # right after the handshake. `rtmp_buffer` (in ms) gives the source
+        # a moment to deliver the first packets.
+        return [
+            "-rtmp_live", "live",
+            "-rtmp_buffer", "1000",
+            "-i", url,
+        ]
     return ["-i", url]
 
 
@@ -1068,8 +1078,11 @@ def _spawn_ffmpeg_for_stream(media_id: str, record: Dict[str, Any]) -> Path:
         "warning",
         "-fflags",
         "+nobuffer",
+        # Read/connect timeout 15 sec — long enough for slow uplinks and
+        # RTMP servers that take a moment to relay the first chunk to a
+        # new consumer, short enough that genuinely-dead URLs fail visibly.
         "-rw_timeout",
-        "5000000",
+        "15000000",
         *_stream_input_args(record),
         # Re-encode to broadly compatible H.264 + AAC for hls.js.
         "-c:v",
@@ -1097,10 +1110,15 @@ def _spawn_ffmpeg_for_stream(media_id: str, record: Dict[str, Any]) -> Path:
         str(out_dir / "stream.m3u8"),
     ]
     logger.info("Starting ffmpeg for stream %s: %s", media_id, " ".join(cmd))
+    # Pipe stderr to a log file so failures (unreachable RTMP, codec error,
+    # etc.) are debuggable. Without this, ffmpeg can die instantly and we
+    # have no clue why — the user just sees a missing-media play button.
+    log_file = out_dir / "ffmpeg.log"
+    log_fh = open(log_file, "ab", buffering=0)
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
     )
     return out_dir, proc
