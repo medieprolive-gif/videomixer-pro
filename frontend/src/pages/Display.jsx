@@ -64,8 +64,12 @@ export default function Display() {
   // a temporal-dead-zone in the dependency array (showProgramOverview is
   // declared further down in the component body).
   const showOverviewRef = useRef(false);
-  const [currentSrcId, setCurrentSrcId] = useState(null);
   const [showCursor, setShowCursor] = useState(false);
+  // Becomes true when an upstream live stream is selected as PGM but the
+  // HLS manifest has been unavailable for an extended period (typically
+  // because the encoder is offline). Surfaces a "Venter på strøm"-overlay
+  // instead of the browser's blank/play-button fallback.
+  const [streamWaiting, setStreamWaiting] = useState(false);
   const [fs, setFs] = useState(false);
   const [showKioskOverlay, setShowKioskOverlay] = useState(true);
   const [frozenFrame, setFrozenFrame] = useState(null);
@@ -73,6 +77,11 @@ export default function Display() {
   const cursorTimer = useRef(null);
   const imageTimer = useRef(null);
   const frozenTimer = useRef(null);
+  // Tracks the currently-loaded source id WITHOUT triggering re-renders.
+  // Using state for this caused the swap-effect to re-run mid-flight (after
+  // setCurrentSrcId), which would cancel the in-progress HLS attach IIFE
+  // before `hls.attachMedia` was ever called.
+  const currentSrcIdRef = useRef(null);
 
   // Load media library (so we know media_type / duration of pgm_id)
   const loadMedia = useCallback(async () => {
@@ -198,11 +207,11 @@ export default function Display() {
     if (!isVideo && !isStream) return;
     const v = videoRef.current;
     if (!v) return;
-    if (state?.pgm_id === currentSrcId) return;
+    if (state?.pgm_id === currentSrcIdRef.current) return;
 
     // Capture last frame of the OUTGOING video so we can crossfade over the
     // black gap while the new source is buffering.
-    if (currentSrcId && v.videoWidth > 0 && v.readyState >= 2) {
+    if (currentSrcIdRef.current && v.videoWidth > 0 && v.readyState >= 2) {
       try {
         const c = canvasRef.current || document.createElement("canvas");
         c.width = v.videoWidth;
@@ -216,7 +225,7 @@ export default function Display() {
       }
     }
 
-    setCurrentSrcId(state?.pgm_id);
+    currentSrcIdRef.current = state?.pgm_id;
 
     // Tear down previous hls.js instance if any
     if (hlsRef.current) {
@@ -242,6 +251,7 @@ export default function Display() {
       // Once the first frame is rendered, the apply-state effect re-syncs
       // mute from the global state.
       v.muted = true;
+      setStreamWaiting(false);
       let cancelled = false;
       (async () => {
         try {
@@ -261,7 +271,8 @@ export default function Display() {
           hls.attachMedia(v);
           hls.on(Hls.Events.MEDIA_ATTACHED, () => {
             // Retry loadSource a few times until ffmpeg has emitted the first
-            // segments; the manifest 404s briefly during startup.
+            // segments; the manifest 404s briefly during startup, and
+            // longer if the upstream encoder is offline.
             let attempts = 0;
             const tryLoad = () => {
               attempts += 1;
@@ -271,17 +282,26 @@ export default function Display() {
             hls.on(Hls.Events.ERROR, (_evt, data) => {
               if (
                 data.fatal &&
-                data.type === Hls.ErrorTypes.NETWORK_ERROR &&
-                attempts < 12
+                data.type === Hls.ErrorTypes.NETWORK_ERROR
               ) {
-                setTimeout(tryLoad, 1500);
+                if (attempts < 60) {
+                  // Keep retrying for ~90s — handles the case where the
+                  // upstream encoder reconnects after a brief drop.
+                  setTimeout(tryLoad, 1500);
+                } else {
+                  setStreamWaiting(true);
+                }
               }
+            });
+            hls.on(Hls.Events.FRAG_LOADED, () => {
+              setStreamWaiting(false);
             });
           });
           // Once we have a manifest parsed, force a play() — autoplay
           // attribute may have been suppressed by earlier muted-pause
           // logic, and hls.js doesn't auto-start playback.
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            setStreamWaiting(false);
             const p = v.play();
             if (p && p.catch) p.catch(() => {});
           });
@@ -309,7 +329,7 @@ export default function Display() {
         /* noop */
       }
     }
-  }, [state?.pgm_id, currentSrcId, isVideo, isStream]);
+  }, [state?.pgm_id, isVideo, isStream]);
 
   // Fade out the frozen frame once the new video is ready to render pixels.
   useEffect(() => {
@@ -349,7 +369,18 @@ export default function Display() {
     // single source of truth for play state in that case.
     if (showOverviewRef.current) return;
     v.volume = state.volume ?? 1;
-    v.muted = !!state.muted;
+    // Live streams stay MUTED on the display. Browser autoplay-with-sound
+    // policy blocks programmatic unmute on most TV/kiosk browsers (even
+    // after a click on the kiosk-start button), and the side effect of a
+    // failed unmute is the browser pausing the element — which surfaces the
+    // native play-button overlay. Audio for live programs is expected to
+    // flow through the broadcast path (HDMI/SDI/etc.), not through the
+    // browser. Pre-recorded videos still respect `state.muted` as before.
+    if (isStream) {
+      v.muted = true;
+    } else {
+      v.muted = !!state.muted;
+    }
     v.loop = !!state.loop && !isStream; // looping makes no sense for live streams
 
     // Reset the cached "last applied time" when the underlying source changes
@@ -391,7 +422,9 @@ export default function Display() {
       if (state?.pgm_id) sendPublic({ action: "ended", media_id: state.pgm_id });
     };
     v.addEventListener("ended", onEnded);
-    return () => v.removeEventListener("ended", onEnded);
+    return () => {
+      v.removeEventListener("ended", onEnded);
+    };
   }, [state?.pgm_id, sendPublic]);
 
   // Image duration timer
@@ -607,7 +640,20 @@ export default function Display() {
         }}
       >
         <video
-          ref={videoRef}
+          ref={(el) => {
+            videoRef.current = el;
+            if (el) {
+              // Critical: React's `muted` JSX prop doesn't reliably set the
+              // DOM `muted` property. Without an actually-muted element,
+              // browsers attempt autoplay-with-sound, get rejected, and
+              // surface their native play-button overlay instead of the
+              // stream. Setting `muted` imperatively here guarantees the
+              // element is muted from its very first frame, which lets
+              // autoplay succeed on TVs and mobile.
+              el.muted = true;
+              el.defaultMuted = true;
+            }
+          }}
           data-testid="display-video"
           className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${
             (isVideo || isStream) && !showProgramOverview
@@ -665,6 +711,30 @@ export default function Display() {
           </div>
           <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-zinc-700 font-mono">
             Sal · {roomId}
+          </div>
+        </div>
+
+        {/* "Venter på strøm" — appears when an upstream live stream is the
+            PGM but its HLS manifest stays unavailable (encoder offline). */}
+        <div
+          className={`absolute inset-0 flex flex-col items-center justify-center text-center transition-opacity duration-500 z-20 ${
+            isStream && streamWaiting && !showProgramOverview && !showKioskOverlay
+              ? "opacity-100"
+              : "opacity-0 pointer-events-none"
+          }`}
+          data-testid="display-stream-waiting"
+        >
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border border-rose-500/30 bg-rose-500/5 mb-6">
+            <Film className="w-8 h-8 text-rose-400 animate-pulse" strokeWidth={1.5} />
+          </div>
+          <div className="text-3xl font-semibold tracking-tight text-white mb-2">
+            Venter på strøm
+          </div>
+          <div className="text-xs uppercase tracking-[0.3em] text-zinc-500">
+            Live-kilden er ikke tilgjengelig
+          </div>
+          <div className="mt-2 text-[10px] uppercase tracking-[0.2em] text-zinc-700 font-mono">
+            {pgm?.stream_protocol?.toUpperCase() || ""} · {pgm?.filename}
           </div>
         </div>
 
