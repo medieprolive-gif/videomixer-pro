@@ -202,25 +202,43 @@ async def _expire_bumper(room: str, bumper_id: str, sleep_for: float):
 
 # ---------- App ----------
 def _ensure_ffmpeg_installed() -> None:
-    """Reinstall ffmpeg if it has gone missing (e.g. after a container
-    restart). Streams + broadcast push-out depend on it; failing here
-    silently leads to invisible bugs ("video not playing")."""
+    """Reinstall ffmpeg, Xvfb, Chromium and PulseAudio if any are missing
+    (e.g. after a container restart). All four are needed for the composite
+    broadcast pipeline (`/broadcast/start`). Failing here silently leads to
+    invisible bugs ("video not playing", "HLS won't start")."""
     import shutil
 
-    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+    required = {
+        "ffmpeg": "ffmpeg",
+        "ffprobe": "ffmpeg",
+        "Xvfb": "xvfb",
+        "chromium": "chromium",
+        "pulseaudio": "pulseaudio",
+        "pactl": "pulseaudio-utils",
+    }
+    missing_bins = [b for b in required if not shutil.which(b)]
+    if not missing_bins:
         return
-    logger.info("ffmpeg not found — installing via apt-get")
+    packages = sorted({required[b] for b in missing_bins})
+    logger.info(
+        "Composite-broadcast deps missing: %s — installing %s",
+        missing_bins, packages,
+    )
     try:
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
         subprocess.run(
-            ["apt-get", "install", "-y", "ffmpeg"],
+            ["apt-get", "install", "-y", *packages],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
-            timeout=300,
+            timeout=600,
+            env=env,
         )
-        logger.info("ffmpeg installed: %s", shutil.which("ffmpeg"))
+        for b in missing_bins:
+            logger.info("  %s -> %s", b, shutil.which(b))
     except Exception as e:
-        logger.error("ffmpeg install failed: %s", e)
+        logger.error("apt install failed: %s", e)
 
 
 @asynccontextmanager
