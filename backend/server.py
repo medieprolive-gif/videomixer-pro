@@ -1386,9 +1386,26 @@ _broadcast_state: Dict[str, Dict[str, Any]] = {}
 _broadcast_lock = asyncio.Lock()
 
 
+BROADCAST_HLS_ROOT = Path("/tmp/kk_broadcast_hls")
+BROADCAST_HLS_ROOT.mkdir(parents=True, exist_ok=True)
+
+
 class BroadcastConfig(BaseModel):
+    """Configuration for a broadcast push-out.
+
+    `output_mode` decides where the encoded PGM goes:
+      - `rtmp`  → push to `target_url` (default; Travpark / other RTMP server)
+      - `hls`   → write a rolling HLS manifest under
+                  `/api/broadcast/{room}/hls/stream.m3u8` (no external server)
+      - `both`  → tee to BOTH simultaneously using ffmpeg's tee muxer
+
+    For `hls` mode `target_url` is optional / ignored. For `rtmp` and `both`
+    it is required.
+    """
+
     room: str = DEFAULT_ROOM
-    target_url: str  # rtmp://host/app/key
+    target_url: Optional[str] = None  # rtmp://host/app/key
+    output_mode: str = "rtmp"  # "rtmp" | "hls" | "both"
 
 
 def _broadcast_input_for_media(record: Optional[Dict[str, Any]]) -> Optional[Tuple[List[str], bool]]:
@@ -1415,13 +1432,36 @@ def _broadcast_input_for_media(record: Optional[Dict[str, Any]]) -> Optional[Tup
     return None
 
 
-def _spawn_broadcast(room: str, target_url: str, input_args: List[str], needs_silent_audio: bool) -> subprocess.Popen:
-    """Start ffmpeg pushing to target_url. FLV only supports one audio
-    stream, so we conditionally inject a silent track ONLY when the source
-    has no audio (e.g. still images)."""
+def _spawn_broadcast(
+    room: str,
+    target_url: Optional[str],
+    input_args: List[str],
+    needs_silent_audio: bool,
+    output_mode: str = "rtmp",
+) -> subprocess.Popen:
+    """Start ffmpeg pushing to target_url and/or HLS, depending on mode.
+
+    FLV only supports one audio stream, so we conditionally inject a silent
+    track ONLY when the source has no audio (e.g. still images). For HLS we
+    write to `BROADCAST_HLS_ROOT/{room}/` and serve via `/api/broadcast/.../hls`.
+
+    For `both` mode we use ffmpeg's tee muxer to fan-out a single encode to
+    both destinations, which avoids re-encoding the same source twice.
+    """
     log_dir = Path("/tmp/kk_broadcast")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"{room}.log"
+
+    # Prep HLS output dir (clean stale segments) when mode includes HLS.
+    hls_dir = BROADCAST_HLS_ROOT / room
+    if output_mode in ("hls", "both"):
+        hls_dir.mkdir(parents=True, exist_ok=True)
+        for f in hls_dir.glob("*"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
     audio_input: List[str] = []
     audio_maps: List[str] = []
     if needs_silent_audio:
@@ -1429,14 +1469,9 @@ def _spawn_broadcast(room: str, target_url: str, input_args: List[str], needs_si
         audio_maps = ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
     else:
         audio_maps = ["-map", "0:v:0?", "-map", "0:a:0?"]
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel", "warning",
-        *input_args,
-        *audio_input,
-        *audio_maps,
+
+    # Shared video / audio encoding params.
+    encode_args = [
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-tune", "zerolatency",
@@ -1449,10 +1484,48 @@ def _spawn_broadcast(room: str, target_url: str, input_args: List[str], needs_si
         "-c:a", "aac",
         "-ar", "44100",
         "-b:a", "128k",
-        "-f", "flv",
-        target_url,
     ]
-    logger.info("Broadcast push to %s: %s", target_url, " ".join(cmd))
+
+    if output_mode == "hls":
+        sink_args = [
+            "-f", "hls",
+            "-hls_time", "2",
+            "-hls_list_size", "6",
+            "-hls_flags", "delete_segments+omit_endlist+independent_segments",
+            "-hls_segment_filename", str(hls_dir / "seg_%05d.ts"),
+            str(hls_dir / "stream.m3u8"),
+        ]
+    elif output_mode == "both":
+        if not target_url:
+            raise RuntimeError("target_url is required for output_mode=both")
+        # tee muxer: single encode -> both FLV (RTMP) and HLS.
+        # `f=...` is per-output. Independent segments help Android TV decoders.
+        hls_seg = str(hls_dir / "seg_%05d.ts").replace(":", "\\:")
+        hls_m3u8 = str(hls_dir / "stream.m3u8").replace(":", "\\:")
+        tee_target = (
+            f"[f=flv:onfail=ignore]{target_url}|"
+            f"[f=hls:hls_time=2:hls_list_size=6:"
+            f"hls_flags=delete_segments+omit_endlist+independent_segments:"
+            f"hls_segment_filename={hls_seg}]{hls_m3u8}"
+        )
+        sink_args = ["-f", "tee", tee_target]
+    else:  # rtmp (default)
+        if not target_url:
+            raise RuntimeError("target_url is required for output_mode=rtmp")
+        sink_args = ["-f", "flv", target_url]
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel", "warning",
+        *input_args,
+        *audio_input,
+        *audio_maps,
+        *encode_args,
+        *sink_args,
+    ]
+    logger.info("Broadcast (%s) push: %s", output_mode, " ".join(cmd))
     fh = open(log_file, "ab", buffering=0)
     proc = subprocess.Popen(
         cmd,
@@ -1501,7 +1574,12 @@ async def _broadcast_loop(room: str):
                 if input_result:
                     input_args, needs_silent = input_result
                     last_proc = await asyncio.to_thread(
-                        _spawn_broadcast, room, cfg["target_url"], input_args, needs_silent
+                        _spawn_broadcast,
+                        room,
+                        cfg.get("target_url"),
+                        input_args,
+                        needs_silent,
+                        cfg.get("output_mode", "rtmp"),
                     )
                     cfg["proc"] = last_proc
                     cfg["current_media_id"] = pgm_id
@@ -1526,10 +1604,19 @@ async def _broadcast_loop(room: str):
 @api_router.post("/broadcast/start")
 async def broadcast_start(payload: BroadcastConfig, _: bool = Depends(require_auth)):
     room = _normalize_room(payload.room)
-    if not payload.target_url.startswith(("rtmp://", "rtmps://")):
+    mode = (payload.output_mode or "rtmp").lower()
+    if mode not in ("rtmp", "hls", "both"):
         raise HTTPException(
-            status_code=400, detail="Mål må være rtmp:// eller rtmps:// URL"
+            status_code=400, detail="output_mode må være rtmp, hls eller both"
         )
+    target_url: Optional[str] = payload.target_url
+    if mode in ("rtmp", "both"):
+        if not target_url or not target_url.startswith(("rtmp://", "rtmps://")):
+            raise HTTPException(
+                status_code=400, detail="Mål må være rtmp:// eller rtmps:// URL"
+            )
+    else:
+        target_url = None
     async with _broadcast_lock:
         prev = _broadcast_state.get(room)
         if prev:
@@ -1539,13 +1626,24 @@ async def broadcast_start(payload: BroadcastConfig, _: bool = Depends(require_au
                 task.cancel()
         _broadcast_state[room] = {
             "enabled": True,
-            "target_url": payload.target_url,
+            "output_mode": mode,
+            "target_url": target_url,
             "proc": None,
             "current_media_id": None,
             "started_at": time.time(),
         }
         _broadcast_state[room]["task"] = asyncio.create_task(_broadcast_loop(room))
-    return {"ok": True, "room": room, "target_url": payload.target_url}
+    return {
+        "ok": True,
+        "room": room,
+        "output_mode": mode,
+        "target_url": target_url,
+        "hls_manifest": (
+            f"/api/broadcast/{room}/hls/stream.m3u8"
+            if mode in ("hls", "both")
+            else None
+        ),
+    }
 
 
 @api_router.post("/broadcast/stop")
@@ -1571,14 +1669,44 @@ async def broadcast_status(room: str = DEFAULT_ROOM):
         return {"running": False, "room": room}
     proc = cfg.get("proc")
     alive = bool(proc and proc.poll() is None)
+    mode = cfg.get("output_mode", "rtmp")
     return {
         "running": True,
         "room": room,
+        "output_mode": mode,
         "target_url": cfg.get("target_url"),
+        "hls_manifest": (
+            f"/api/broadcast/{room}/hls/stream.m3u8"
+            if mode in ("hls", "both")
+            else None
+        ),
         "ffmpeg_alive": alive,
         "current_media_id": cfg.get("current_media_id"),
         "started_at": cfg.get("started_at"),
     }
+
+
+@api_router.get("/broadcast/{room}/hls/{filename}")
+async def serve_broadcast_hls(room: str, filename: str):
+    """Public HLS endpoint for the rolling broadcast push-out. Consumed by
+    third-party players (Android TV apps, web players, etc.)."""
+    room = _normalize_room(room)
+    if "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Ugyldig filnavn")
+    file_path = BROADCAST_HLS_ROOT / room / filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Segment ikke klart ennå")
+    if filename.endswith(".m3u8"):
+        media_type = "application/vnd.apple.mpegurl"
+    elif filename.endswith(".ts"):
+        media_type = "video/mp2t"
+    else:
+        media_type = "application/octet-stream"
+    headers = {
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*",
+    }
+    return FileResponse(file_path, media_type=media_type, headers=headers)
 
 
 @api_router.get("/schedule", response_model=List[ScheduleOut])

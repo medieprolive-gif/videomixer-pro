@@ -24,7 +24,7 @@ import {
   Cast,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api, clearToken, streamUrl, thumbUrl } from "../lib/api";
+import { api, BACKEND_URL, clearToken, streamUrl, thumbUrl } from "../lib/api";
 import { useSync } from "../lib/useSync";
 
 function pad(n) {
@@ -1736,7 +1736,14 @@ function AutoPlanModal({ date, roomId, onClose, onGenerated }) {
 const DEFAULT_RTMP_TARGET =
   "rtmp://104.248.36.128/Travpark_TV/travpark_tv";
 
+const OUTPUT_MODES = [
+  { v: "rtmp", l: "RTMP" },
+  { v: "hls", l: "HLS" },
+  { v: "both", l: "Begge" },
+];
+
 function BroadcastPanel({ roomId }) {
+  const [mode, setMode] = useState("rtmp");
   const [targetUrl, setTargetUrl] = useState(DEFAULT_RTMP_TARGET);
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1758,14 +1765,24 @@ function BroadcastPanel({ roomId }) {
 
   const running = !!status?.running;
   const alive = !!status?.ffmpeg_alive;
+  // Resolve the absolute, externally-reachable HLS URL the user can copy
+  // into their Android TV app. Uses the same origin as the backend, so it
+  // is correct both in preview and after deployment.
+  const hlsAbsoluteUrl = status?.hls_manifest
+    ? `${BACKEND_URL}${status.hls_manifest}`
+    : null;
 
   const start = async () => {
     setBusy(true);
     try {
-      await api.post("/broadcast/start", {
+      const payload = {
         room: roomId,
-        target_url: targetUrl.trim(),
-      });
+        output_mode: mode,
+      };
+      if (mode === "rtmp" || mode === "both") {
+        payload.target_url = targetUrl.trim();
+      }
+      await api.post("/broadcast/start", payload);
       toast.success("Sending startet");
       refresh();
     } catch (e) {
@@ -1788,6 +1805,18 @@ function BroadcastPanel({ roomId }) {
     }
   };
 
+  const copyHls = async () => {
+    if (!hlsAbsoluteUrl) return;
+    try {
+      await navigator.clipboard.writeText(hlsAbsoluteUrl);
+      toast.success("HLS-URL kopiert");
+    } catch (_) {
+      toast.error("Klarte ikke kopiere — kopier manuelt");
+    }
+  };
+
+  const needsRtmpInput = mode === "rtmp" || mode === "both";
+
   return (
     <section
       className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4"
@@ -1795,7 +1824,7 @@ function BroadcastPanel({ roomId }) {
     >
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold flex items-center gap-2">
-          <Cast className="w-3 h-3" /> RTMP-sending ut
+          <Cast className="w-3 h-3" /> Sending ut
           {running && (
             <span
               className={`text-[9px] tracking-[0.25em] px-2 py-0.5 rounded border ${
@@ -1811,6 +1840,9 @@ function BroadcastPanel({ roomId }) {
                 }`}
               />
               {alive ? "ON AIR" : "STARTER..."}
+              <span className="ml-2 opacity-70">
+                {(status?.output_mode || "rtmp").toUpperCase()}
+              </span>
             </span>
           )}
         </div>
@@ -1827,7 +1859,7 @@ function BroadcastPanel({ roomId }) {
         ) : (
           <button
             onClick={start}
-            disabled={busy || !targetUrl.trim()}
+            disabled={busy || (needsRtmpInput && !targetUrl.trim())}
             data-testid="broadcast-start"
             className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] bg-red-600 hover:bg-red-500 text-white font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
           >
@@ -1837,27 +1869,73 @@ function BroadcastPanel({ roomId }) {
         )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <input
-          type="text"
-          value={targetUrl}
-          onChange={(e) => setTargetUrl(e.target.value)}
-          placeholder="rtmp://server/app/key"
-          disabled={running}
-          data-testid="broadcast-target-url"
-          className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B] disabled:opacity-50"
-        />
-        {running && status?.target_url && (
-          <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 truncate max-w-[40%]">
-            → {status.target_url.replace(/^rtmp[s]?:\/\//, "")}
-          </div>
-        )}
+      {/* Output-mode tab selector */}
+      <div className="inline-flex border border-white/10 rounded-md overflow-hidden bg-[#050505] mb-3">
+        {OUTPUT_MODES.map((m) => (
+          <button
+            key={m.v}
+            onClick={() => !running && setMode(m.v)}
+            disabled={running}
+            data-testid={`broadcast-mode-${m.v}`}
+            className={`text-[10px] uppercase tracking-[0.2em] px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              mode === m.v
+                ? "bg-[#F59E0B]/15 text-[#F59E0B]"
+                : "text-zinc-500 hover:text-white"
+            }`}
+          >
+            {m.l}
+          </button>
+        ))}
       </div>
 
+      {needsRtmpInput && (
+        <div className="flex items-center gap-2 mb-2">
+          <input
+            type="text"
+            value={targetUrl}
+            onChange={(e) => setTargetUrl(e.target.value)}
+            placeholder="rtmp://server/app/key"
+            disabled={running}
+            data-testid="broadcast-target-url"
+            className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B] disabled:opacity-50"
+          />
+          {running && status?.target_url && (
+            <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 truncate max-w-[40%]">
+              → {status.target_url.replace(/^rtmp[s]?:\/\//, "")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {hlsAbsoluteUrl && (
+        <div className="flex items-center gap-2 mb-2" data-testid="broadcast-hls-row">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-400 font-semibold shrink-0">
+            HLS:
+          </div>
+          <input
+            type="text"
+            readOnly
+            value={hlsAbsoluteUrl}
+            data-testid="broadcast-hls-url"
+            className="flex-1 bg-[#050505] border border-emerald-500/30 rounded px-3 py-2 text-emerald-300 text-xs font-mono focus:outline-none truncate"
+            onFocus={(e) => e.target.select()}
+          />
+          <button
+            onClick={copyHls}
+            data-testid="broadcast-hls-copy"
+            className="text-[10px] uppercase tracking-[0.2em] text-emerald-400 hover:text-emerald-300 px-3 py-2 border border-emerald-500/30 hover:bg-emerald-500/10 rounded-md transition-colors shrink-0"
+          >
+            Kopier
+          </button>
+        </div>
+      )}
+
       <p className="text-[10px] text-zinc-600 mt-2 leading-relaxed">
-        Sender det som vises i Program (PGM) ut til denne RTMP-URL-en. Overlays
-        som programoversikt, nyhetsticker og "neste opp" rendres kun i nettleseren
-        og er ikke en del av RTMP-utsendelsen.
+        Sender det som vises i Program (PGM) ut. Velg RTMP for å pushe til en
+        ekstern server, HLS for en offentlig .m3u8-URL som Android TV-appen
+        din kan koble til direkte, eller Begge for å sende til begge samtidig.
+        Overlays (programoversikt, nyhetsticker, «neste opp») rendres kun i
+        nettleseren og er ikke en del av utsendelsen.
       </p>
     </section>
   );
