@@ -886,27 +886,44 @@ export default function Playout() {
       });
       const newId = r.data?.id;
       if (!newId) throw new Error("Manglet id i svar");
-      const next = { ...settings, [settingKey]: newId };
-      setSettings(next);
-      await api.put(`/rooms/${roomId}/settings`, {
-        room: roomId,
-        global_bumper_id: next.global_bumper_id || null,
-        global_bumper_duration: parseFloat(next.global_bumper_duration) || 5,
-        program_overview_enabled: !!next.program_overview_enabled,
-        program_overview_logo_id: next.program_overview_logo_id || null,
-        program_overview_background_id: next.program_overview_background_id || null,
-        program_overview_text_color: next.program_overview_text_color || "#FFFFFF",
-        program_overview_duration: parseFloat(next.program_overview_duration) || 8,
-        program_overview_music_id: next.program_overview_music_id || null,
-        program_overview_music_volume:
-          parseFloat(next.program_overview_music_volume) || 0.6,
-      });
+      await persistSettingField(settingKey, newId);
       toast.success("Filen lastet opp");
       loadAll();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Opplasting feilet");
     } finally {
       busySetter(false);
+    }
+  };
+
+  /**
+   * Patch a single field in `settings` AND immediately persist the full
+   * settings doc to the backend. Used by the "fjern"-buttons (logo, bg,
+   * music) and the upload flow so the user doesn't have to scroll down
+   * and hit "Lagre" for every small change.
+   */
+  const persistSettingField = async (key, value) => {
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+    try {
+      await api.put(`/rooms/${roomId}/settings`, {
+        room: roomId,
+        global_bumper_id: next.global_bumper_id || null,
+        global_bumper_duration: parseFloat(next.global_bumper_duration) || 5,
+        program_overview_enabled: !!next.program_overview_enabled,
+        program_overview_logo_id: next.program_overview_logo_id || null,
+        program_overview_background_id:
+          next.program_overview_background_id || null,
+        program_overview_text_color:
+          next.program_overview_text_color || "#FFFFFF",
+        program_overview_duration:
+          parseFloat(next.program_overview_duration) || 8,
+        program_overview_music_id: next.program_overview_music_id || null,
+        program_overview_music_volume:
+          parseFloat(next.program_overview_music_volume) || 0.6,
+      });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Kunne ikke lagre");
     }
   };
 
@@ -1238,7 +1255,7 @@ export default function Playout() {
                 {settings.program_overview_logo_id && (
                   <button
                     onClick={() =>
-                      setSettings({ ...settings, program_overview_logo_id: null })
+                      persistSettingField("program_overview_logo_id", null)
                     }
                     title="Fjern logo"
                     data-testid="playout-overview-logo-clear"
@@ -1298,7 +1315,10 @@ export default function Playout() {
                 {settings.program_overview_background_id && (
                   <button
                     onClick={() =>
-                      setSettings({ ...settings, program_overview_background_id: null })
+                      persistSettingField(
+                        "program_overview_background_id",
+                        null
+                      )
                     }
                     title="Fjern bakgrunn"
                     data-testid="playout-overview-bg-clear"
@@ -1372,10 +1392,10 @@ export default function Playout() {
                 <select
                   value={settings.program_overview_music_id || ""}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      program_overview_music_id: e.target.value || null,
-                    })
+                    persistSettingField(
+                      "program_overview_music_id",
+                      e.target.value || null
+                    )
                   }
                   data-testid="playout-overview-music"
                   className="flex-1 min-w-[200px] bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-[#F59E0B]"
@@ -1419,7 +1439,7 @@ export default function Playout() {
                 {settings.program_overview_music_id && (
                   <button
                     onClick={() =>
-                      setSettings({ ...settings, program_overview_music_id: null })
+                      persistSettingField("program_overview_music_id", null)
                     }
                     title="Fjern musikk"
                     data-testid="playout-overview-music-clear"
