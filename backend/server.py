@@ -10,7 +10,7 @@ import logging
 import subprocess
 import tempfile
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional, Dict, Any, Tuple
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -51,6 +51,8 @@ def init_storage() -> str:
     resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
     resp.raise_for_status()
     storage_key = resp.json()["storage_key"]
+    if not storage_key:
+        raise RuntimeError("storage init returned empty storage_key")
     return storage_key
 
 
@@ -1159,7 +1161,9 @@ def _stream_input_args(record: Dict[str, Any]) -> List[str]:
     return ["-i", url]
 
 
-def _spawn_ffmpeg_for_stream(media_id: str, record: Dict[str, Any]) -> Path:
+def _spawn_ffmpeg_for_stream(
+    media_id: str, record: Dict[str, Any]
+) -> Tuple[Path, subprocess.Popen]:
     """Start an ffmpeg process that pulls the SRT/RTMP source and writes HLS
     segments to /tmp/kk_streams/{media_id}/. Returns the output directory."""
     out_dir = STREAMS_ROOT / media_id
@@ -2020,7 +2024,8 @@ def _fetch_nrk_news_sync() -> List[str]:
     )
     titles: List[str] = []
     for entry in (parsed.entries or [])[:25]:
-        t = (entry.get("title") or "").strip()
+        raw_title = entry.get("title") or ""
+        t = str(raw_title).strip()
         if t:
             titles.append(t)
     return titles

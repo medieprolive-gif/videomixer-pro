@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL") or open("/app/frontend/.env").read().split("REACT_APP_BACKEND_URL=")[1].split("\n")[0].strip()
 BASE_URL = BASE_URL.rstrip("/")
 API = f"{BASE_URL}/api"
-PASSWORD = "kino123"
+PASSWORD = os.environ.get("KK_TEST_PASSWORD", "kino123")
 
 
 def ws_url() -> str:

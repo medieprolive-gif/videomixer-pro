@@ -23,7 +23,7 @@ BASE_URL = (
     or open("/app/frontend/.env").read().split("REACT_APP_BACKEND_URL=")[1].split("\n")[0].strip()
 ).rstrip("/")
 API = f"{BASE_URL}/api"
-PASSWORD = "kino123"
+PASSWORD = os.environ.get("KK_TEST_PASSWORD", "kino123")
 
 
 def ws_url(room: str | None = None) -> str:
