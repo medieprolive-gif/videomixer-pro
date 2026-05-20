@@ -1408,84 +1408,115 @@ class BroadcastConfig(BaseModel):
     output_mode: str = "rtmp"  # "rtmp" | "hls" | "both"
 
 
-def _broadcast_input_for_media(record: Optional[Dict[str, Any]]) -> Optional[Tuple[List[str], bool]]:
-    """Return (ffmpeg input args, needs_silent_audio) for the given PGM media."""
-    if not record:
-        return None
-    mt = record.get("media_type")
-    if mt == "video":
-        public_url = (
-            f"http://localhost:8001/api/videos/{record['id']}/stream"
-        )
-        return ["-re", "-i", public_url], False
-    if mt == "stream":
-        return [
-            "-rtmp_live", "live",
-            "-rtmp_buffer", "1000",
-            *_stream_input_args(record),
-        ], False
-    if mt == "image":
-        public_url = (
-            f"http://localhost:8001/api/videos/{record['id']}/thumbnail"
-        )
-        return ["-loop", "1", "-framerate", "25", "-i", public_url], True
-    return None
+BROADCAST_WIDTH = 1280
+BROADCAST_HEIGHT = 720
+BROADCAST_FPS = 25
+# Display URL used by the headless Chromium. We always go through localhost
+# so we don't depend on outside DNS during composite render. `?embed=1`
+# tells /display to skip the click-to-fullscreen kiosk overlay.
+BROADCAST_PAGE_URL = "http://localhost:3000/display?embed=1"
 
 
-def _spawn_broadcast(
-    room: str,
-    target_url: Optional[str],
-    input_args: List[str],
-    needs_silent_audio: bool,
-    output_mode: str = "rtmp",
-) -> subprocess.Popen:
-    """Start ffmpeg pushing to target_url and/or HLS, depending on mode.
-
-    FLV only supports one audio stream, so we conditionally inject a silent
-    track ONLY when the source has no audio (e.g. still images). For HLS we
-    write to `BROADCAST_HLS_ROOT/{room}/` and serve via `/api/broadcast/.../hls`.
-
-    For `both` mode we use ffmpeg's tee muxer to fan-out a single encode to
-    both destinations, which avoids re-encoding the same source twice.
-    """
+def _broadcast_paths(room: str) -> Dict[str, Path]:
+    hls_dir = BROADCAST_HLS_ROOT / room
+    hls_dir.mkdir(parents=True, exist_ok=True)
+    profile = Path("/tmp/kk_broadcast_profile") / room
+    profile.mkdir(parents=True, exist_ok=True)
     log_dir = Path("/tmp/kk_broadcast")
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{room}.log"
+    return {"hls": hls_dir, "profile": profile, "log": log_dir}
 
-    # Prep HLS output dir (clean stale segments) when mode includes HLS.
-    hls_dir = BROADCAST_HLS_ROOT / room
-    if output_mode in ("hls", "both"):
-        hls_dir.mkdir(parents=True, exist_ok=True)
-        for f in hls_dir.glob("*"):
-            try:
-                f.unlink()
-            except Exception:
-                pass
 
-    audio_input: List[str] = []
-    audio_maps: List[str] = []
-    if needs_silent_audio:
-        audio_input = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
-        audio_maps = ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
-    else:
-        audio_maps = ["-map", "0:v:0?", "-map", "0:a:0?"]
+def _next_xdisplay_num(room: str) -> int:
+    # Use a deterministic display number per room so concurrent sessions
+    # don't fight. Rooms are short slugs so a stable hash is fine.
+    base = 90 + (abs(hash(room)) % 8)
+    return base
 
-    # Shared video / audio encoding params.
-    encode_args = [
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-pix_fmt", "yuv420p",
-        "-r", "25",
-        "-g", "50",
-        "-b:v", "2500k",
-        "-maxrate", "2500k",
-        "-bufsize", "5000k",
-        "-c:a", "aac",
-        "-ar", "44100",
-        "-b:a", "128k",
+
+def _start_xvfb(display_num: int, log_file: Path) -> subprocess.Popen:
+    cmd = [
+        "Xvfb",
+        f":{display_num}",
+        "-screen", "0", f"{BROADCAST_WIDTH}x{BROADCAST_HEIGHT}x24",
+        "-nolisten", "tcp",
     ]
+    fh = open(log_file, "ab", buffering=0)
+    return subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
 
+
+def _start_pulse(runtime_dir: Path, log_file: Path) -> Tuple[subprocess.Popen, str]:
+    """Start a per-room pulse daemon with a null sink we can record from."""
+    sink_name = f"kk_sink_{runtime_dir.name.replace('-', '_')}"
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "pulseaudio",
+        "--start",
+        "--exit-idle-time=-1",
+        "--disallow-exit",
+        "--load=module-native-protocol-unix",
+        f"--load=module-null-sink sink_name={sink_name} sink_properties=device.description={sink_name}",
+    ]
+    fh = open(log_file, "ab", buffering=0)
+    proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+    # `pulseaudio --start` forks; the parent exits. Wait briefly for daemon.
+    time.sleep(1.0)
+    # Make the new sink the default so chromium routes audio there.
+    subprocess.run(
+        ["pactl", "set-default-sink", sink_name],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return proc, sink_name
+
+
+def _start_chromium(
+    display_num: int, profile_dir: Path, pulse_runtime: Path, log_file: Path
+) -> subprocess.Popen:
+    env = os.environ.copy()
+    env["DISPLAY"] = f":{display_num}"
+    env["XDG_RUNTIME_DIR"] = str(pulse_runtime)
+    env["PULSE_RUNTIME_PATH"] = str(pulse_runtime / "pulse")
+    cmd = [
+        "chromium",
+        "--no-sandbox",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-dev-shm-usage",
+        "--disable-features=Translate,InfiniteSessionRestore",
+        "--autoplay-policy=no-user-gesture-required",
+        "--start-fullscreen",
+        f"--window-size={BROADCAST_WIDTH},{BROADCAST_HEIGHT}",
+        "--window-position=0,0",
+        f"--user-data-dir={profile_dir}",
+        # Keep audio routed through PulseAudio so ffmpeg can capture it.
+        "--alsa-output-device=plug:default",
+        "--kiosk",
+        BROADCAST_PAGE_URL,
+    ]
+    fh = open(log_file, "ab", buffering=0)
+    return subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+
+def _start_ffmpeg_composite(
+    display_num: int,
+    pulse_runtime: Path,
+    pulse_sink: str,
+    target_url: Optional[str],
+    hls_dir: Path,
+    output_mode: str,
+    log_file: Path,
+) -> subprocess.Popen:
+    env = os.environ.copy()
+    env["DISPLAY"] = f":{display_num}"
+    env["XDG_RUNTIME_DIR"] = str(pulse_runtime)
+    env["PULSE_RUNTIME_PATH"] = str(pulse_runtime / "pulse")
+    encode = [
+        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+        "-pix_fmt", "yuv420p", "-r", str(BROADCAST_FPS), "-g", str(BROADCAST_FPS * 2),
+        "-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
+        "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
+    ]
     if output_mode == "hls":
         sink_args = [
             "-f", "hls",
@@ -1497,9 +1528,7 @@ def _spawn_broadcast(
         ]
     elif output_mode == "both":
         if not target_url:
-            raise RuntimeError("target_url is required for output_mode=both")
-        # tee muxer: single encode -> both FLV (RTMP) and HLS.
-        # `f=...` is per-output. Independent segments help Android TV decoders.
+            raise RuntimeError("target_url required for output_mode=both")
         hls_seg = str(hls_dir / "seg_%05d.ts").replace(":", "\\:")
         hls_m3u8 = str(hls_dir / "stream.m3u8").replace(":", "\\:")
         tee_target = (
@@ -1509,96 +1538,141 @@ def _spawn_broadcast(
             f"hls_segment_filename={hls_seg}]{hls_m3u8}"
         )
         sink_args = ["-f", "tee", tee_target]
-    else:  # rtmp (default)
+    else:  # rtmp
         if not target_url:
-            raise RuntimeError("target_url is required for output_mode=rtmp")
+            raise RuntimeError("target_url required for output_mode=rtmp")
         sink_args = ["-f", "flv", target_url]
 
     cmd = [
         "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel", "warning",
-        *input_args,
-        *audio_input,
-        *audio_maps,
-        *encode_args,
+        "-y", "-hide_banner", "-loglevel", "warning",
+        # Video: grab X11 framebuffer.
+        "-f", "x11grab",
+        "-framerate", str(BROADCAST_FPS),
+        "-video_size", f"{BROADCAST_WIDTH}x{BROADCAST_HEIGHT}",
+        "-i", f":{display_num}",
+        # Audio: monitor of the null sink Chromium plays into.
+        "-f", "pulse",
+        "-i", f"{pulse_sink}.monitor",
+        *encode,
         *sink_args,
     ]
-    logger.info("Broadcast (%s) push: %s", output_mode, " ".join(cmd))
+    logger.info("Composite ffmpeg: %s", " ".join(cmd))
     fh = open(log_file, "ab", buffering=0)
-    proc = subprocess.Popen(
-        cmd,
-        stdout=fh,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
+    return subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+
+
+def _composite_spawn_all(
+    room: str, target_url: Optional[str], output_mode: str
+) -> Dict[str, Any]:
+    """Spin up Xvfb + Pulse + Chromium + ffmpeg for a composite broadcast.
+
+    Returns dict with proc handles so the watcher / stop endpoint can
+    inspect liveness and tear everything down cleanly."""
+    paths = _broadcast_paths(room)
+    # Clean previous HLS segments.
+    for f in paths["hls"].glob("*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    display_num = _next_xdisplay_num(room)
+    log_xvfb = paths["log"] / f"{room}.xvfb.log"
+    log_pulse = paths["log"] / f"{room}.pulse.log"
+    log_chromium = paths["log"] / f"{room}.chromium.log"
+    log_ffmpeg = paths["log"] / f"{room}.log"
+
+    xvfb_proc = _start_xvfb(display_num, log_xvfb)
+    # Give Xvfb a moment to bind the display before chromium/ffmpeg attach.
+    time.sleep(1.5)
+    pulse_runtime = Path(f"/tmp/kk_pulse_{room}")
+    pulse_proc, pulse_sink = _start_pulse(pulse_runtime, log_pulse)
+    chromium_proc = _start_chromium(display_num, paths["profile"], pulse_runtime, log_chromium)
+    # Chromium takes a few seconds to lay out + start playing media. We
+    # delay ffmpeg start so the very first segment isn't a blank slate.
+    time.sleep(6.0)
+    ffmpeg_proc = _start_ffmpeg_composite(
+        display_num, pulse_runtime, pulse_sink, target_url, paths["hls"], output_mode, log_ffmpeg
     )
-    return proc
+    return {
+        "xvfb": xvfb_proc,
+        "pulse": pulse_proc,
+        "chromium": chromium_proc,
+        "ffmpeg": ffmpeg_proc,
+        "display": display_num,
+        "pulse_runtime": pulse_runtime,
+        "pulse_sink": pulse_sink,
+    }
+
+
+def _composite_stop_all(handles: Dict[str, Any]) -> None:
+    for key in ("ffmpeg", "chromium", "pulse", "xvfb"):
+        proc: Optional[subprocess.Popen] = handles.get(key)
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    # Give each process up to 3s to exit cleanly, then kill.
+    deadline = time.time() + 4
+    for key in ("ffmpeg", "chromium", "pulse", "xvfb"):
+        proc = handles.get(key)
+        if proc:
+            remaining = max(0.0, deadline - time.time())
+            try:
+                proc.wait(remaining)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 async def _broadcast_loop(room: str):
-    """Watcher task: keeps ffmpeg pushing whatever is current PGM. When PGM
-    changes, kills the current ffmpeg and starts a new one with the new
-    input. Exits when the room's broadcast config is removed."""
-    last_pgm_id: Optional[str] = None
-    last_proc: Optional[subprocess.Popen] = None
-    while True:
-        try:
+    """Watcher task: keeps the composite pipeline alive. Unlike the old
+    per-media spawn loop, Chromium handles PGM changes itself via the same
+    WebSocket /display uses — so we only need to watch for crashes."""
+    handles: Optional[Dict[str, Any]] = None
+    try:
+        cfg = _broadcast_state.get(room)
+        if not cfg:
+            return
+        handles = await asyncio.to_thread(
+            _composite_spawn_all,
+            room, cfg.get("target_url"), cfg.get("output_mode", "rtmp"),
+        )
+        cfg["handles"] = handles
+        cfg["proc"] = handles["ffmpeg"]
+        while True:
             cfg = _broadcast_state.get(room)
             if not cfg or not cfg.get("enabled"):
-                if last_proc and last_proc.poll() is None:
-                    try:
-                        last_proc.terminate()
-                    except Exception:
-                        pass
                 return
-            state = await get_state_doc(room)
-            pgm_id = state.get("pgm_id")
-            proc_alive = last_proc and last_proc.poll() is None
-            if pgm_id != last_pgm_id or not proc_alive:
-                if last_proc and last_proc.poll() is None:
-                    try:
-                        last_proc.terminate()
-                        await asyncio.to_thread(last_proc.wait, 3)
-                    except Exception:
-                        try:
-                            last_proc.kill()
-                        except Exception:
-                            pass
-                record = None
-                if pgm_id:
-                    record = await db.videos.find_one(
-                        {"id": pgm_id, "is_deleted": False}, {"_id": 0}
-                    )
-                input_result = _broadcast_input_for_media(record)
-                if input_result:
-                    input_args, needs_silent = input_result
-                    last_proc = await asyncio.to_thread(
-                        _spawn_broadcast,
-                        room,
-                        cfg.get("target_url"),
-                        input_args,
-                        needs_silent,
-                        cfg.get("output_mode", "rtmp"),
-                    )
-                    cfg["proc"] = last_proc
-                    cfg["current_media_id"] = pgm_id
-                else:
-                    last_proc = None
-                    cfg["proc"] = None
-                    cfg["current_media_id"] = None
-                last_pgm_id = pgm_id
-            await asyncio.sleep(2)
-        except asyncio.CancelledError:
-            if last_proc and last_proc.poll() is None:
-                try:
-                    last_proc.terminate()
-                except Exception:
-                    pass
-            raise
-        except Exception:
-            logger.exception("broadcast loop error")
-            await asyncio.sleep(5)
+            # Restart ffmpeg only — chromium + Xvfb + pulse should outlive
+            # transient encoder hiccups. If chromium dies, that's a session
+            # death and the user should stop+start manually.
+            ffmpeg_proc = handles.get("ffmpeg") if handles else None
+            if ffmpeg_proc and ffmpeg_proc.poll() is not None:
+                logger.info("ffmpeg died, restarting for room %s", room)
+                new_ffmpeg = await asyncio.to_thread(
+                    _start_ffmpeg_composite,
+                    handles["display"],
+                    handles["pulse_runtime"],
+                    handles["pulse_sink"],
+                    cfg.get("target_url"),
+                    BROADCAST_HLS_ROOT / room,
+                    cfg.get("output_mode", "rtmp"),
+                    Path("/tmp/kk_broadcast") / f"{room}.log",
+                )
+                handles["ffmpeg"] = new_ffmpeg
+                cfg["proc"] = new_ffmpeg
+            await asyncio.sleep(3)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("composite broadcast loop error for room %s", room)
+    finally:
+        if handles:
+            await asyncio.to_thread(_composite_stop_all, handles)
 
 
 @api_router.post("/broadcast/start")

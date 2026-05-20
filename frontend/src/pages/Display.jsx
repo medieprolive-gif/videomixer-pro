@@ -71,7 +71,15 @@ export default function Display() {
   // instead of the browser's blank/play-button fallback.
   const [streamWaiting, setStreamWaiting] = useState(false);
   const [fs, setFs] = useState(false);
-  const [showKioskOverlay, setShowKioskOverlay] = useState(true);
+  // `?embed=1` is used by the server-side composite-broadcast headless
+  // Chromium. It needs to skip the click-to-fullscreen overlay so that the
+  // page renders directly and ffmpeg can capture it. Audio autoplay is
+  // already allowed by passing `--autoplay-policy=no-user-gesture-required`
+  // to chromium, so we only need to suppress the visual kiosk overlay.
+  const isEmbed =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("embed") === "1";
+  const [showKioskOverlay, setShowKioskOverlay] = useState(!isEmbed);
   const [frozenFrame, setFrozenFrame] = useState(null);
   const [frozenOpacity, setFrozenOpacity] = useState(0);
   const cursorTimer = useRef(null);
