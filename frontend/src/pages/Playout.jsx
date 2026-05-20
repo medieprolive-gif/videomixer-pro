@@ -20,6 +20,8 @@ import {
   LayoutGrid,
   Loader2,
   Music,
+  Wand2,
+  Cast,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, clearToken, streamUrl, thumbUrl } from "../lib/api";
@@ -795,6 +797,7 @@ export default function Playout() {
   const [uploadingBg, setUploadingBg] = useState(false);
   const [uploadingBumper, setUploadingBumper] = useState(false);
   const [uploadingMusic, setUploadingMusic] = useState(false);
+  const [showAutoModal, setShowAutoModal] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -1029,6 +1032,9 @@ export default function Playout() {
             {state?.is_playing ? "PLAYING" : "PAUSED"}
           </div>
         </section>
+
+        {/* RTMP push-out: re-streams current PGM to an RTMP destination */}
+        <BroadcastPanel roomId={roomId} />
 
         {/* Settings */}
         <section className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4 opacity-60">
@@ -1498,13 +1504,23 @@ export default function Playout() {
                 I dag
               </button>
             </div>
-            <button
-              onClick={() => setEditing({ mode: "create", initialTime: `${date}T20:00` })}
-              data-testid="playout-add-button"
-              className="inline-flex items-center gap-2 bg-[#F59E0B] hover:bg-[#FBBF24] text-black font-medium text-sm px-4 py-2 rounded-md transition-colors"
-            >
-              <Plus className="w-4 h-4" /> Nytt innslag
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowAutoModal(true)}
+                data-testid="playout-autogen-button"
+                className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-zinc-300 hover:text-[#F59E0B] px-3 py-2 border border-white/10 hover:border-[#F59E0B]/40 rounded-md transition-colors"
+                title="Generer automatisk dagsplan"
+              >
+                <Wand2 className="w-3.5 h-3.5" /> Auto-plan
+              </button>
+              <button
+                onClick={() => setEditing({ mode: "create", initialTime: `${date}T20:00` })}
+                data-testid="playout-add-button"
+                className="inline-flex items-center gap-2 bg-[#F59E0B] hover:bg-[#FBBF24] text-black font-medium text-sm px-4 py-2 rounded-md transition-colors"
+              >
+                <Plus className="w-4 h-4" /> Nytt innslag
+              </button>
+            </div>
           </div>
 
           <TimelineGrid
@@ -1530,6 +1546,299 @@ export default function Playout() {
           onSaved={loadAll}
         />
       )}
+
+      {showAutoModal && (
+        <AutoPlanModal
+          date={date}
+          roomId={roomId}
+          onClose={() => setShowAutoModal(false)}
+          onGenerated={() => {
+            setShowAutoModal(false);
+            loadAll();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Generate a full broadcast day automatically from the media library:
+ * one next-episode of every series + one movie at the end, spaced
+ * `gap_minutes` apart starting at `start_time`.
+ */
+function AutoPlanModal({ date, roomId, onClose, onGenerated }) {
+  const [startTime, setStartTime] = useState("18:00");
+  const [gap, setGap] = useState(5);
+  const [includeMovie, setIncludeMovie] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const generate = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post("/playout/autogenerate", {
+        date,
+        start_time: startTime,
+        room: roomId,
+        gap_minutes: Math.max(0, parseInt(gap, 10) || 0),
+        include_movie: includeMovie,
+        replace_existing: true,
+      });
+      const items = r.data?.items || [];
+      const skipped = r.data?.skipped_series || [];
+      toast.success(
+        `${items.length} innslag lagt til` +
+          (skipped.length ? ` (hoppet over: ${skipped.join(", ")})` : "")
+      );
+      onGenerated();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Kunne ikke generere plan");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+      data-testid="playout-autogen-modal"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-[#0A0A0A] border border-white/10 rounded-lg w-full max-w-lg">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <Wand2 className="w-4 h-4 text-[#F59E0B]" />
+            <h3 className="font-heading text-base text-white">
+              Generer dagsplan
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            data-testid="playout-autogen-close"
+            className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white/5 text-zinc-400 hover:text-white"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-zinc-500 leading-relaxed">
+            Setter sammen én ny episode av hver opplastet serie i alfabetisk
+            rekkefølge, etterfulgt av én film. Erstatter eventuelle eksisterende
+            innslag for <span className="text-zinc-300">{date}</span>.
+          </p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1">
+                Starttidspunkt
+              </label>
+              <input
+                type="time"
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                data-testid="autogen-start-time"
+                className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1">
+                Pause mellom innslag (min)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={gap}
+                onChange={(e) => setGap(e.target.value)}
+                data-testid="autogen-gap"
+                className="w-full bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B]"
+              />
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={includeMovie}
+              onChange={(e) => setIncludeMovie(e.target.checked)}
+              data-testid="autogen-include-movie"
+              className="accent-[#F59E0B]"
+            />
+            <span className="text-sm text-zinc-300">
+              Inkluder dagens film til slutt
+            </span>
+          </label>
+        </div>
+
+        <div className="flex items-center justify-end px-5 py-3 border-t border-white/10 gap-2">
+          <button
+            onClick={onClose}
+            className="text-xs uppercase tracking-[0.15em] text-zinc-500 hover:text-white px-4 py-2 transition-colors"
+          >
+            Avbryt
+          </button>
+          <button
+            onClick={generate}
+            disabled={busy}
+            data-testid="autogen-submit"
+            className="inline-flex items-center gap-2 bg-[#F59E0B] hover:bg-[#FBBF24] text-black font-medium text-sm px-5 py-2 rounded-md transition-colors disabled:opacity-50"
+          >
+            {busy ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Wand2 className="w-4 h-4" />
+            )}
+            {busy ? "Genererer..." : "Generer"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * RTMP push-out: starts a backend ffmpeg process that re-streams the current
+ * PGM media to a configurable RTMP destination. Operator can choose any URL
+ * (defaults to the Travpark target). NOTE: overlays (program overview, ticker,
+ * "neste opp") are NOT composited into the push — they live in the browser only.
+ */
+const DEFAULT_RTMP_TARGET =
+  "rtmp://104.248.36.128/Travpark_TV/travpark_tv";
+
+function BroadcastPanel({ roomId }) {
+  const [targetUrl, setTargetUrl] = useState(DEFAULT_RTMP_TARGET);
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await api.get("/broadcast/status", { params: { room: roomId } });
+      setStatus(r.data || null);
+    } catch (_) {
+      setStatus(null);
+    }
+  }, [roomId]);
+
+  useEffect(() => {
+    refresh();
+    const i = setInterval(refresh, 4000);
+    return () => clearInterval(i);
+  }, [refresh]);
+
+  const running = !!status?.running;
+  const alive = !!status?.ffmpeg_alive;
+
+  const start = async () => {
+    setBusy(true);
+    try {
+      await api.post("/broadcast/start", {
+        room: roomId,
+        target_url: targetUrl.trim(),
+      });
+      toast.success("Sending startet");
+      refresh();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Kunne ikke starte sending");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stop = async () => {
+    setBusy(true);
+    try {
+      await api.post("/broadcast/stop", null, { params: { room: roomId } });
+      toast.success("Sending stoppet");
+      refresh();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Kunne ikke stoppe sending");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section
+      className="mb-6 bg-[#0A0A0A] border border-white/10 rounded-lg p-4"
+      data-testid="playout-broadcast-panel"
+    >
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-500 font-semibold flex items-center gap-2">
+          <Cast className="w-3 h-3" /> RTMP-sending ut
+          {running && (
+            <span
+              className={`text-[9px] tracking-[0.25em] px-2 py-0.5 rounded border ${
+                alive
+                  ? "text-red-400 border-red-500/40 bg-red-500/10"
+                  : "text-amber-400 border-amber-500/40 bg-amber-500/10"
+              }`}
+              data-testid="broadcast-status-pill"
+            >
+              <span
+                className={`inline-block w-1.5 h-1.5 rounded-full mr-1 align-middle ${
+                  alive ? "bg-red-500 animate-pulse" : "bg-amber-500"
+                }`}
+              />
+              {alive ? "ON AIR" : "STARTER..."}
+            </span>
+          )}
+        </div>
+        {running ? (
+          <button
+            onClick={stop}
+            disabled={busy}
+            data-testid="broadcast-stop"
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-rose-400 hover:text-white px-3 py-2 border border-rose-500/30 hover:bg-rose-500/10 rounded-md transition-colors disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}
+            Stopp sending
+          </button>
+        ) : (
+          <button
+            onClick={start}
+            disabled={busy || !targetUrl.trim()}
+            data-testid="broadcast-start"
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] bg-red-600 hover:bg-red-500 text-white font-semibold px-3 py-2 rounded-md transition-colors disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cast className="w-3.5 h-3.5" />}
+            Start sending
+          </button>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={targetUrl}
+          onChange={(e) => setTargetUrl(e.target.value)}
+          placeholder="rtmp://server/app/key"
+          disabled={running}
+          data-testid="broadcast-target-url"
+          className="flex-1 bg-[#050505] border border-white/10 rounded px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-[#F59E0B] disabled:opacity-50"
+        />
+        {running && status?.target_url && (
+          <div className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 truncate max-w-[40%]">
+            → {status.target_url.replace(/^rtmp[s]?:\/\//, "")}
+          </div>
+        )}
+      </div>
+
+      <p className="text-[10px] text-zinc-600 mt-2 leading-relaxed">
+        Sender det som vises i Program (PGM) ut til denne RTMP-URL-en. Overlays
+        som programoversikt, nyhetsticker og "neste opp" rendres kun i nettleseren
+        og er ikke en del av RTMP-utsendelsen.
+      </p>
+    </section>
   );
 }

@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import uuid
 from datetime import datetime, timezone, timedelta
 import requests
@@ -199,8 +199,34 @@ async def _expire_bumper(room: str, bumper_id: str, sleep_for: float):
 
 
 # ---------- App ----------
+def _ensure_ffmpeg_installed() -> None:
+    """Reinstall ffmpeg if it has gone missing (e.g. after a container
+    restart). Streams + broadcast push-out depend on it; failing here
+    silently leads to invisible bugs ("video not playing")."""
+    import shutil
+
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+    logger.info("ffmpeg not found — installing via apt-get")
+    try:
+        subprocess.run(
+            ["apt-get", "install", "-y", "ffmpeg"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+        )
+        logger.info("ffmpeg installed: %s", shutil.which("ffmpeg"))
+    except Exception as e:
+        logger.error("ffmpeg install failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    try:
+        await asyncio.to_thread(_ensure_ffmpeg_installed)
+    except Exception as e:
+        logger.error(f"ffmpeg ensure failed: {e}")
     try:
         await asyncio.to_thread(init_storage)
         logger.info("Storage initialized")
@@ -299,6 +325,40 @@ class VideoOut(BaseModel):
     stream_url: Optional[str] = None
     stream_protocol: Optional[str] = None  # "srt" | "rtmp"
     stream_mode: Optional[str] = None  # "caller" | "listener" (SRT only)
+    # Auto-scheduler metadata (parsed from filename on upload, editable)
+    series_name: Optional[str] = None  # e.g. "Miss Marple". None = standalone
+    episode_number: Optional[int] = None
+    is_movie: bool = False  # treated as a one-off (not part of a series rotation)
+
+
+import re
+
+# Filename pattern: matches "Series Name S01E03", "Series.Name.s1e3", etc.
+_SERIES_RE = re.compile(
+    r"^(?P<name>.+?)[\s._-]*[Ss](?P<season>\d{1,2})[\s._-]*[Ee](?P<ep>\d{1,3})",
+)
+
+
+def _parse_series_info(filename: str) -> Dict[str, Any]:
+    """Extract `series_name` + `episode_number` from a filename.
+
+    Returns {} when no recognizable pattern is found. Episode-number is the
+    absolute position computed as `season * 100 + episode` so that S02E01
+    sorts after S01E10. is_movie is implied when no pattern matches.
+    """
+    base = filename.rsplit(".", 1)[0] if "." in filename else filename
+    m = _SERIES_RE.match(base)
+    if not m:
+        return {}
+    name = m.group("name").replace(".", " ").replace("_", " ").strip()
+    season = int(m.group("season"))
+    ep = int(m.group("ep"))
+    if not name:
+        return {}
+    return {
+        "series_name": name,
+        "episode_number": season * 100 + ep,
+    }
 
 
 class StreamCreate(BaseModel):
@@ -461,6 +521,15 @@ async def upload_video(
         "duration": safe_duration,
         "category": cat,
     }
+    # Auto-parse series info from filename — only meaningful for videos in
+    # the "content" category (skip bumpers, logos, etc).
+    if media_type == "video" and cat == "content" and file.filename:
+        series_info = _parse_series_info(file.filename)
+        if series_info:
+            doc.update(series_info)
+            doc["is_movie"] = False
+        else:
+            doc["is_movie"] = True
     # For images, the file itself is its own thumbnail.
     if media_type == "image":
         doc["thumbnail_path"] = result["path"]
@@ -619,6 +688,38 @@ async def update_category(video_id: str, payload: CategoryPatch, _: bool = Depen
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Media ikke funnet")
     return {"ok": True, "category": cat}
+
+
+class SeriesPatch(BaseModel):
+    """Edits the series / episode / movie classification of a video item."""
+
+    series_name: Optional[str] = None
+    episode_number: Optional[int] = None
+    is_movie: Optional[bool] = None
+
+
+@api_router.patch("/videos/{video_id}/series")
+async def update_series(video_id: str, payload: SeriesPatch, _: bool = Depends(require_auth)):
+    update: Dict[str, Any] = {}
+    if payload.series_name is not None:
+        name = payload.series_name.strip()
+        update["series_name"] = name or None
+    if payload.episode_number is not None:
+        update["episode_number"] = int(payload.episode_number)
+    if payload.is_movie is not None:
+        update["is_movie"] = bool(payload.is_movie)
+        if payload.is_movie:
+            # Movies don't belong to a series rotation — clear those fields.
+            update["series_name"] = None
+            update["episode_number"] = None
+    if not update:
+        raise HTTPException(status_code=400, detail="Ingen felt å oppdatere")
+    res = await db.videos.update_one(
+        {"id": video_id, "is_deleted": False}, {"$set": update}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Media ikke funnet")
+    return {"ok": True, **update}
 
 
 @api_router.get("/videos", response_model=List[VideoOut])
@@ -1267,6 +1368,215 @@ async def serve_hls(media_id: str, filename: str):
     return FileResponse(file_path, media_type=media_type, headers=headers)
 
 
+# ---------- RTMP broadcast push-out ----------
+# Maintains a single ffmpeg process per room that re-encodes whatever is
+# currently PGM and pushes it out to the configured RTMP destination, so the
+# entire broadcast can be consumed downstream by viewers / archivers / CDNs.
+# Limitations vs /display:
+#   - We re-stream the raw media source (video file from object storage or
+#     live RTMP/SRT input). Bumpers, program overview overlays, NRK ticker
+#     and "neste opp"-overlay are NOT composited into the pushed stream —
+#     those are rendered client-side in the browser only.
+#   - When PGM is empty/idle we push a slate "Venter på program" still.
+_broadcast_state: Dict[str, Dict[str, Any]] = {}
+_broadcast_lock = asyncio.Lock()
+
+
+class BroadcastConfig(BaseModel):
+    room: str = DEFAULT_ROOM
+    target_url: str  # rtmp://host/app/key
+
+
+def _broadcast_input_for_media(record: Optional[Dict[str, Any]]) -> Optional[Tuple[List[str], bool]]:
+    """Return (ffmpeg input args, needs_silent_audio) for the given PGM media."""
+    if not record:
+        return None
+    mt = record.get("media_type")
+    if mt == "video":
+        public_url = (
+            f"http://localhost:8001/api/videos/{record['id']}/stream"
+        )
+        return ["-re", "-i", public_url], False
+    if mt == "stream":
+        return [
+            "-rtmp_live", "live",
+            "-rtmp_buffer", "1000",
+            *_stream_input_args(record),
+        ], False
+    if mt == "image":
+        public_url = (
+            f"http://localhost:8001/api/videos/{record['id']}/thumbnail"
+        )
+        return ["-loop", "1", "-framerate", "25", "-i", public_url], True
+    return None
+
+
+def _spawn_broadcast(room: str, target_url: str, input_args: List[str], needs_silent_audio: bool) -> subprocess.Popen:
+    """Start ffmpeg pushing to target_url. FLV only supports one audio
+    stream, so we conditionally inject a silent track ONLY when the source
+    has no audio (e.g. still images)."""
+    log_dir = Path("/tmp/kk_broadcast")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{room}.log"
+    audio_input: List[str] = []
+    audio_maps: List[str] = []
+    if needs_silent_audio:
+        audio_input = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+        audio_maps = ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+    else:
+        audio_maps = ["-map", "0:v:0?", "-map", "0:a:0?"]
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel", "warning",
+        *input_args,
+        *audio_input,
+        *audio_maps,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-pix_fmt", "yuv420p",
+        "-r", "25",
+        "-g", "50",
+        "-b:v", "2500k",
+        "-maxrate", "2500k",
+        "-bufsize", "5000k",
+        "-c:a", "aac",
+        "-ar", "44100",
+        "-b:a", "128k",
+        "-f", "flv",
+        target_url,
+    ]
+    logger.info("Broadcast push to %s: %s", target_url, " ".join(cmd))
+    fh = open(log_file, "ab", buffering=0)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=fh,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+    )
+    return proc
+
+
+async def _broadcast_loop(room: str):
+    """Watcher task: keeps ffmpeg pushing whatever is current PGM. When PGM
+    changes, kills the current ffmpeg and starts a new one with the new
+    input. Exits when the room's broadcast config is removed."""
+    last_pgm_id: Optional[str] = None
+    last_proc: Optional[subprocess.Popen] = None
+    while True:
+        try:
+            cfg = _broadcast_state.get(room)
+            if not cfg or not cfg.get("enabled"):
+                if last_proc and last_proc.poll() is None:
+                    try:
+                        last_proc.terminate()
+                    except Exception:
+                        pass
+                return
+            state = await get_state_doc(room)
+            pgm_id = state.get("pgm_id")
+            proc_alive = last_proc and last_proc.poll() is None
+            if pgm_id != last_pgm_id or not proc_alive:
+                if last_proc and last_proc.poll() is None:
+                    try:
+                        last_proc.terminate()
+                        await asyncio.to_thread(last_proc.wait, 3)
+                    except Exception:
+                        try:
+                            last_proc.kill()
+                        except Exception:
+                            pass
+                record = None
+                if pgm_id:
+                    record = await db.videos.find_one(
+                        {"id": pgm_id, "is_deleted": False}, {"_id": 0}
+                    )
+                input_result = _broadcast_input_for_media(record)
+                if input_result:
+                    input_args, needs_silent = input_result
+                    last_proc = await asyncio.to_thread(
+                        _spawn_broadcast, room, cfg["target_url"], input_args, needs_silent
+                    )
+                    cfg["proc"] = last_proc
+                    cfg["current_media_id"] = pgm_id
+                else:
+                    last_proc = None
+                    cfg["proc"] = None
+                    cfg["current_media_id"] = None
+                last_pgm_id = pgm_id
+            await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            if last_proc and last_proc.poll() is None:
+                try:
+                    last_proc.terminate()
+                except Exception:
+                    pass
+            raise
+        except Exception:
+            logger.exception("broadcast loop error")
+            await asyncio.sleep(5)
+
+
+@api_router.post("/broadcast/start")
+async def broadcast_start(payload: BroadcastConfig, _: bool = Depends(require_auth)):
+    room = _normalize_room(payload.room)
+    if not payload.target_url.startswith(("rtmp://", "rtmps://")):
+        raise HTTPException(
+            status_code=400, detail="Mål må være rtmp:// eller rtmps:// URL"
+        )
+    async with _broadcast_lock:
+        prev = _broadcast_state.get(room)
+        if prev:
+            prev["enabled"] = False
+            task = prev.get("task")
+            if task and not task.done():
+                task.cancel()
+        _broadcast_state[room] = {
+            "enabled": True,
+            "target_url": payload.target_url,
+            "proc": None,
+            "current_media_id": None,
+            "started_at": time.time(),
+        }
+        _broadcast_state[room]["task"] = asyncio.create_task(_broadcast_loop(room))
+    return {"ok": True, "room": room, "target_url": payload.target_url}
+
+
+@api_router.post("/broadcast/stop")
+async def broadcast_stop(room: str = DEFAULT_ROOM, _: bool = Depends(require_auth)):
+    room = _normalize_room(room)
+    async with _broadcast_lock:
+        cfg = _broadcast_state.get(room)
+        if not cfg:
+            return {"ok": True, "running": False}
+        cfg["enabled"] = False
+        task = cfg.get("task")
+        if task and not task.done():
+            task.cancel()
+        _broadcast_state.pop(room, None)
+    return {"ok": True, "running": False}
+
+
+@api_router.get("/broadcast/status")
+async def broadcast_status(room: str = DEFAULT_ROOM):
+    room = _normalize_room(room)
+    cfg = _broadcast_state.get(room)
+    if not cfg:
+        return {"running": False, "room": room}
+    proc = cfg.get("proc")
+    alive = bool(proc and proc.poll() is None)
+    return {
+        "running": True,
+        "room": room,
+        "target_url": cfg.get("target_url"),
+        "ffmpeg_alive": alive,
+        "current_media_id": cfg.get("current_media_id"),
+        "started_at": cfg.get("started_at"),
+    }
+
+
 @api_router.get("/schedule", response_model=List[ScheduleOut])
 async def list_schedule(room: str = Query(DEFAULT_ROOM)):
     items = await db.schedule.find(
@@ -1326,6 +1636,199 @@ async def delete_schedule(sched_id: str, _: bool = Depends(require_auth)):
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Ikke funnet")
     return {"ok": True}
+
+
+# ---------- Auto-scheduler ----------
+class AutoScheduleRequest(BaseModel):
+    """Generate a day's broadcast schedule from the media library."""
+
+    date: str  # YYYY-MM-DD (local calendar day)
+    start_time: str = "18:00"  # HH:MM 24h local
+    room: str = DEFAULT_ROOM
+    gap_minutes: int = 5
+    include_movie: bool = True
+    # When true, ALL existing schedule items for this day+room are deleted
+    # before the auto-plan is inserted. When false the auto-plan refuses to
+    # overwrite if items already exist.
+    replace_existing: bool = True
+
+
+class AutoScheduleResult(BaseModel):
+    items: List[ScheduleOut]
+    skipped_series: List[str] = []  # series with no remaining unplayed eps
+
+
+async def _pick_next_episode(series: str, room: str) -> Optional[Dict[str, Any]]:
+    """Return the next unplayed episode of `series` for `room`.
+
+    Strategy: pick the lowest `episode_number` that has not appeared in the
+    schedule history yet. Once every episode has been played, wraps around
+    to the lowest-numbered one (long-running channels shouldn't go silent).
+    """
+    eps = await db.videos.find(
+        {
+            "is_deleted": False,
+            "media_type": "video",
+            "category": {"$ne": "asset"},
+            "series_name": series,
+            "is_movie": {"$ne": True},
+        },
+        {"_id": 0},
+    ).sort("episode_number", 1).to_list(500)
+    if not eps:
+        return None
+    # Episodes already scheduled (any status, any time) for this room
+    played_rows = await db.schedule.find(
+        {"room": room, "media_id": {"$in": [e["id"] for e in eps]}},
+        {"_id": 0, "media_id": 1},
+    ).to_list(2000)
+    played_ids = {p["media_id"] for p in played_rows}
+    for e in eps:
+        if e["id"] not in played_ids:
+            return e
+    # All played — wrap around (lowest episode_number).
+    return eps[0]
+
+
+async def _pick_movie(room: str) -> Optional[Dict[str, Any]]:
+    """Random movie not scheduled in the last 30 days (per room)."""
+    import random as _rand
+
+    movies = await db.videos.find(
+        {
+            "is_deleted": False,
+            "media_type": "video",
+            "category": {"$ne": "asset"},
+            "is_movie": True,
+        },
+        {"_id": 0},
+    ).to_list(500)
+    if not movies:
+        return None
+    # Filter out movies already scheduled in the last 30 days in this room
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    recent_rows = await db.schedule.find(
+        {
+            "room": room,
+            "media_id": {"$in": [m["id"] for m in movies]},
+            "scheduled_at": {"$gte": cutoff.isoformat()},
+        },
+        {"_id": 0, "media_id": 1},
+    ).to_list(500)
+    recent_ids = {r["media_id"] for r in recent_rows}
+    candidates = [m for m in movies if m["id"] not in recent_ids] or movies
+    return _rand.choice(candidates)
+
+
+@api_router.post("/playout/autogenerate", response_model=AutoScheduleResult)
+async def auto_generate(payload: AutoScheduleRequest, _: bool = Depends(require_auth)):
+    """Build a day's broadcast schedule automatically.
+
+    Algorithm: one next-episode per detected series (sorted alphabetically by
+    series name), then one movie at the end. Each item gets a `duration_minutes`
+    based on the media's probed duration (rounded up to the nearest minute,
+    minimum 5). Items are spaced `gap_minutes` apart.
+    """
+    room = _normalize_room(payload.room)
+    # Parse date + start_time as a LOCAL datetime, store as UTC.
+    try:
+        y, m, d = [int(x) for x in payload.date.split("-")]
+        hh, mm = [int(x) for x in payload.start_time.split(":")]
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Ugyldig dato eller klokkeslett")
+    # Build local-time naïve datetime, then attach UTC tz (frontend already
+    # converts user input to ISO/UTC for /schedule; we mirror that contract
+    # by treating the input as UTC-equivalent to keep the math consistent).
+    start_dt = datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
+
+    # Day window in stored format (ISO strings).
+    day_start = datetime(y, m, d, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    existing = await db.schedule.find(
+        {
+            "room": room,
+            "scheduled_at": {
+                "$gte": day_start.isoformat(),
+                "$lt": day_end.isoformat(),
+            },
+        },
+        {"_id": 0, "id": 1},
+    ).to_list(500)
+    if existing and not payload.replace_existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Dagen har allerede {len(existing)} innslag — sett replace_existing=true",
+        )
+    if existing:
+        await db.schedule.delete_many({"id": {"$in": [e["id"] for e in existing]}})
+
+    # Find all distinct series, alphabetically.
+    series_rows = await db.videos.aggregate([
+        {"$match": {
+            "is_deleted": False,
+            "media_type": "video",
+            "category": {"$ne": "asset"},
+            "series_name": {"$ne": None},
+            "is_movie": {"$ne": True},
+        }},
+        {"$group": {"_id": "$series_name"}},
+        {"$sort": {"_id": 1}},
+    ]).to_list(200)
+    series_names = [s["_id"] for s in series_rows if s["_id"]]
+
+    # Build the plan: ordered list of media docs.
+    plan: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+    for name in series_names:
+        ep = await _pick_next_episode(name, room)
+        if ep:
+            plan.append(ep)
+        else:
+            skipped.append(name)
+    if payload.include_movie:
+        movie = await _pick_movie(room)
+        if movie:
+            plan.append(movie)
+
+    if not plan:
+        raise HTTPException(
+            status_code=400,
+            detail="Fant ingen serie-episoder eller filmer å sette opp",
+        )
+
+    # Insert with rolling start times.
+    gap = max(0, int(payload.gap_minutes)) * 60
+    inserted_docs: List[Dict[str, Any]] = []
+    cursor = start_dt
+    for media in plan:
+        dur_sec = float(media.get("duration") or 0.0)
+        dur_min = max(5, int(-(-dur_sec // 60)))  # ceil minutes
+        title = media.get("series_name") or media.get("filename") or "Innslag"
+        if media.get("series_name") and media.get("episode_number") is not None:
+            ep_num = int(media["episode_number"])
+            # Display "S01E03" form for readability.
+            title = f"{media['series_name']} · S{ep_num // 100:02d}E{ep_num % 100:02d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "room": room,
+            "scheduled_at": cursor,
+            "media_id": media["id"],
+            "title": title,
+            "next_up_text": "",
+            "pre_plakat_id": None,
+            "pre_plakat_duration": 0.0,
+            "duration_minutes": dur_min,
+            "status": "scheduled",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.schedule.insert_one(doc.copy())
+        inserted_docs.append(doc)
+        cursor = cursor + timedelta(minutes=dur_min, seconds=gap)
+
+    return AutoScheduleResult(
+        items=[ScheduleOut(**_serialize_schedule(d)) for d in inserted_docs],
+        skipped_series=skipped,
+    )
 
 
 # ---------- WebSocket sync ----------
