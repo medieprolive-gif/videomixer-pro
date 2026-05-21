@@ -338,6 +338,24 @@ export default function Display() {
     // Static video file
     v.src = streamUrl(state.pgm_id);
     v.load();
+    // Seek to the current broadcast position so a late-joining viewer
+    // jumps in where everyone else is, instead of restarting at 00:00.
+    // We listen for `loadedmetadata` once: until the metadata is parsed
+    // the browser doesn't know the duration and will silently ignore a
+    // `currentTime` set. The scheduler keeps `state.current_time` fresh
+    // every ~2s so seeking is accurate.
+    const targetSeek = Number(state.current_time) || 0;
+    if (targetSeek > 0) {
+      const onMeta = () => {
+        try {
+          v.currentTime = Math.min(targetSeek, Math.max(0, (v.duration || targetSeek) - 0.2));
+        } catch (_) {
+          /* noop */
+        }
+        v.removeEventListener("loadedmetadata", onMeta);
+      };
+      v.addEventListener("loadedmetadata", onMeta);
+    }
     if (showOverviewRef.current) {
       // Don't let autoplay leak audio while overview is up.
       v.muted = true;

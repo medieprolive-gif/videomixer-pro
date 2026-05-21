@@ -168,6 +168,71 @@ async def scheduler_tick():
         if s <= now:
             await _play_main_item(item)
 
+    # Sync state.current_time + expire-on-overrun for every active room.
+    # Without this:
+    #  - Late-joining viewers ALWAYS see the active clip at 00:00 instead
+    #    of jumping into the correct position in the broadcast.
+    #  - PGM stays "stuck" on the last clip long after its scheduled window
+    #    has passed, so /display keeps playing it instead of returning to
+    #    program overview.
+    rooms = await db.state.distinct("id")
+    for room in rooms:
+        state = await get_state_doc(room)
+        if not state.get("pgm_id") or not state.get("is_playing"):
+            continue
+        # Find the schedule item this PGM belongs to (main or pre-plakat).
+        active = await db.schedule.find_one(
+            {
+                "room": room,
+                "$or": [
+                    {"media_id": state["pgm_id"]},
+                    {"pre_plakat_id": state["pgm_id"]},
+                ],
+                "status": {"$in": ["played", "pre_playing"]},
+            },
+            {"_id": 0},
+            sort=[("scheduled_at", -1)],
+        )
+        if not active:
+            continue
+        sched_at = active["scheduled_at"]
+        if isinstance(sched_at, str):
+            sched_at = datetime.fromisoformat(sched_at)
+        if sched_at.tzinfo is None:
+            sched_at = sched_at.replace(tzinfo=timezone.utc)
+        # If PGM is the pre-plakat, the "start" is `scheduled_at - pre_dur`.
+        if active.get("pre_plakat_id") == state["pgm_id"]:
+            pre_dur = float(active.get("pre_plakat_duration") or 0.0)
+            start_dt = sched_at - timedelta(seconds=pre_dur)
+            duration_sec = pre_dur
+        else:
+            start_dt = sched_at
+            duration_sec = float(active.get("duration_minutes") or 15) * 60.0
+        elapsed = (now - start_dt).total_seconds()
+        if elapsed < 0:
+            continue
+        if elapsed > duration_sec:
+            # Item is past its scheduled window — clear PGM so display
+            # returns to program overview / idle. Without this guard the
+            # video would loop or sit on its final frame indefinitely.
+            state["pgm_id"] = None
+            state["pvw_id"] = None
+            state["is_playing"] = False
+            state["current_time"] = 0.0
+            state["next_up_text"] = ""
+            await save_state(state, room)
+            await broadcast_state(state, room)
+            continue
+        # Persist current_time only every few seconds (no need for a
+        # write per tick), but always broadcast so late-joiners can seek.
+        new_ct = round(elapsed, 1)
+        if abs(new_ct - float(state.get("current_time") or 0)) > 3:
+            state["current_time"] = new_ct
+            await save_state(state, room)
+        else:
+            state["current_time"] = new_ct
+        await broadcast_state(state, room)
+
 
 async def scheduler_loop():
     while True:
