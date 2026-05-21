@@ -786,6 +786,7 @@ export default function Playout() {
     program_overview_duration: 8,
     program_overview_music_id: null,
     program_overview_music_volume: 0.6,
+    bug_logo_id: null,
   });
   const [now, setNow] = useState(new Date());
   const { state } = useSync(roomId);
@@ -797,6 +798,7 @@ export default function Playout() {
   const [uploadingBg, setUploadingBg] = useState(false);
   const [uploadingBumper, setUploadingBumper] = useState(false);
   const [uploadingMusic, setUploadingMusic] = useState(false);
+  const [uploadingBug, setUploadingBug] = useState(false);
   const [showAutoModal, setShowAutoModal] = useState(false);
 
   const loadAll = useCallback(async () => {
@@ -856,6 +858,7 @@ export default function Playout() {
         program_overview_duration: parseFloat(settings.program_overview_duration) || 8,
         program_overview_music_id: settings.program_overview_music_id || null,
         program_overview_music_volume: parseFloat(settings.program_overview_music_volume) || 0.6,
+        bug_logo_id: settings.bug_logo_id || null,
       });
       toast.success("Innstillinger lagret");
     } catch (_) {
@@ -921,6 +924,7 @@ export default function Playout() {
         program_overview_music_id: next.program_overview_music_id || null,
         program_overview_music_volume:
           parseFloat(next.program_overview_music_volume) || 0.6,
+        bug_logo_id: next.bug_logo_id || null,
       });
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Kunne ikke lagre");
@@ -1262,6 +1266,95 @@ export default function Playout() {
                     className="text-zinc-500 hover:text-red-400 p-1.5 rounded hover:bg-red-500/10"
                   >
                     <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Bug / hjørne-logo (vises på innslag, IKKE på programoversikt) */}
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.2em] text-zinc-500 mb-1.5">
+                Bug (øverst høyre på innslag)
+              </label>
+              <div className="flex items-center gap-3">
+                <div className="w-20 h-12 rounded bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                  {settings.bug_logo_id ? (
+                    <img
+                      src={thumbUrl(settings.bug_logo_id)}
+                      alt=""
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <ImageIcon className="w-4 h-4 text-zinc-600" />
+                  )}
+                </div>
+                <label
+                  className={`inline-flex items-center gap-2 text-xs uppercase tracking-[0.15em] px-3 py-2 border border-white/10 rounded-md cursor-pointer transition-colors ${
+                    uploadingBug
+                      ? "text-zinc-600 border-white/5 cursor-wait"
+                      : "text-zinc-300 hover:text-[#F59E0B] hover:border-[#F59E0B]/40"
+                  }`}
+                  data-testid="playout-bug-upload"
+                >
+                  {uploadingBug ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <UploadIcon className="w-3.5 h-3.5" />
+                  )}
+                  Last opp bug
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingBug}
+                    onChange={(e) =>
+                      uploadImageToSetting(
+                        e.target.files?.[0],
+                        "bug_logo_id",
+                        setUploadingBug
+                      )
+                    }
+                  />
+                </label>
+                {settings.bug_logo_id && (
+                  <>
+                    <button
+                      onClick={() =>
+                        persistSettingField(
+                          "bug_logo_id",
+                          settings.program_overview_logo_id || null
+                        )
+                      }
+                      title="Bruk programoversikt-logo"
+                      data-testid="playout-bug-use-logo"
+                      disabled={!settings.program_overview_logo_id}
+                      className="text-[10px] uppercase tracking-[0.2em] text-zinc-500 hover:text-[#F59E0B] px-2 py-1.5 border border-white/10 hover:border-[#F59E0B]/40 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      Bruk logo
+                    </button>
+                    <button
+                      onClick={() => persistSettingField("bug_logo_id", null)}
+                      title="Fjern bug"
+                      data-testid="playout-bug-clear"
+                      className="text-zinc-500 hover:text-red-400 p-1.5 rounded hover:bg-red-500/10"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
+                {!settings.bug_logo_id && settings.program_overview_logo_id && (
+                  <button
+                    onClick={() =>
+                      persistSettingField(
+                        "bug_logo_id",
+                        settings.program_overview_logo_id
+                      )
+                    }
+                    title="Bruk programoversikt-logo som bug"
+                    data-testid="playout-bug-use-logo"
+                    className="text-[10px] uppercase tracking-[0.2em] text-zinc-500 hover:text-[#F59E0B] px-2 py-1.5 border border-white/10 hover:border-[#F59E0B]/40 rounded transition-colors"
+                  >
+                    Bruk samme som logo
                   </button>
                 )}
               </div>

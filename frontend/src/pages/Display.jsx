@@ -494,6 +494,41 @@ export default function Display() {
     remaining <= 10 &&
     remaining > 0;
 
+  // "Nå:"-overlay — viser tittelen på det innslaget som akkurat startet,
+  // i 10 sek fra det øyeblikket browseren ser pgm_id endre seg. Vi sporer
+  // bytte-tidspunktet med useState så det fungerer både for opplastede
+  // videoer (som har current_time) og for live-strømmer (som ikke har det).
+  const [pgmStartedAt, setPgmStartedAt] = useState(0);
+  useEffect(() => {
+    if (state?.pgm_id) {
+      setPgmStartedAt(Date.now());
+    } else {
+      setPgmStartedAt(0);
+    }
+  }, [state?.pgm_id]);
+  const showNowPlaying =
+    !!pgm &&
+    !!state?.pgm_id &&
+    state?.is_playing &&
+    pgmStartedAt > 0 &&
+    now - pgmStartedAt < 10000 &&
+    !showNextUp &&
+    !showKioskOverlay;
+
+  // Title used for the "Nå"-overlay. Prefer a scheduled item's title (richer:
+  // "Miss Marple · S01E01"), fall back to the media file name.
+  const nowPlayingTitle = useMemo(() => {
+    if (!state?.pgm_id) return "";
+    const active = (schedule || []).find(
+      (s) => s.media_id === state.pgm_id && s.status !== "cancelled"
+    );
+    return (
+      active?.title ||
+      pgm?.filename ||
+      ""
+    );
+  }, [schedule, state?.pgm_id, pgm?.filename]);
+
   const idle = !state?.pgm_id;
 
   // Is any scheduled item currently within its play window?
@@ -745,6 +780,45 @@ export default function Display() {
             {pgm?.stream_protocol?.toUpperCase() || ""} · {pgm?.filename}
           </div>
         </div>
+
+        {/* Bug / corner watermark — top-right, shown ONLY during a scheduled
+            item (video / live stream / image). Hidden when program overview
+            is up since that already has its own larger centered logo. Size
+            is ~40% of the program-overview logo (60% smaller). */}
+        {settings?.bug_logo_id && !showProgramOverview && !showKioskOverlay && (
+          <img
+            data-testid="display-bug-logo"
+            src={thumbUrl(settings.bug_logo_id)}
+            alt=""
+            className="absolute z-20 pointer-events-none select-none"
+            style={{
+              top: "3%",
+              right: "3%",
+              maxWidth: "8%",
+              maxHeight: "12%",
+              objectFit: "contain",
+              filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.55))",
+              opacity: 0.85,
+            }}
+          />
+        )}
+
+        {/* "Nå opp"-overlay (første 10 sek av PGM) */}
+        {showNowPlaying && (
+          <div
+            data-testid="display-now-playing-overlay"
+            className="absolute bottom-[6%] left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-black/75 backdrop-blur-sm border border-emerald-400/40 px-6 py-3 rounded-md shadow-2xl"
+            style={{ animation: "kk-fade-in 0.4s ease-out" }}
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <div className="text-[10px] uppercase tracking-[0.3em] text-emerald-300 font-mono font-semibold">
+              Nå
+            </div>
+            <div className="text-white text-lg max-w-2xl truncate">
+              {nowPlayingTitle}
+            </div>
+          </div>
+        )}
 
         {/* "Neste opp"-overlay (siste 10 sek av PGM) */}
         {showNextUp && (

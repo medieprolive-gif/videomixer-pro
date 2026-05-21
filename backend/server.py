@@ -1043,6 +1043,10 @@ class RoomSettingsModel(BaseModel):
     program_overview_duration: float = 8.0
     program_overview_music_id: Optional[str] = None
     program_overview_music_volume: float = 0.6
+    # Bug / corner-watermark logo shown on /display ONLY during scheduled
+    # items (videos, live streams, images) — NOT during program overview,
+    # which already has its own larger centered logo. Plassering: top-right.
+    bug_logo_id: Optional[str] = None
 
 
 def _settings_doc_from_payload(room: str, payload: RoomSettingsModel) -> Dict[str, Any]:
@@ -1059,6 +1063,7 @@ def _settings_doc_from_payload(room: str, payload: RoomSettingsModel) -> Dict[st
         "program_overview_music_volume": max(
             0.0, min(1.0, float(payload.program_overview_music_volume or 0.6))
         ),
+        "bug_logo_id": payload.bug_logo_id,
     }
 
 
@@ -1074,6 +1079,7 @@ def _settings_with_defaults(room: str, s: Optional[Dict[str, Any]]) -> Dict[str,
         "program_overview_duration": 8.0,
         "program_overview_music_id": None,
         "program_overview_music_volume": 0.6,
+        "bug_logo_id": None,
     }
     if s:
         base.update({k: v for k, v in s.items() if k in base})
