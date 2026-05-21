@@ -1862,9 +1862,36 @@ async def patch_schedule(sched_id: str, payload: SchedulePatch, _: bool = Depend
 
 @api_router.delete("/schedule/{sched_id}")
 async def delete_schedule(sched_id: str, _: bool = Depends(require_auth)):
-    res = await db.schedule.delete_one({"id": sched_id})
-    if res.deleted_count == 0:
+    # Look up the item first so we know which media id was tied to it. If
+    # it happens to be the currently-airing PGM (or its pre-plakat), we
+    # also clear the room state so the display goes back to the program
+    # overview / idle screen rather than silently keeping the dead clip on.
+    doc = await db.schedule.find_one({"id": sched_id}, {"_id": 0})
+    if not doc:
         raise HTTPException(status_code=404, detail="Ikke funnet")
+    await db.schedule.delete_one({"id": sched_id})
+    room = doc.get("room") or DEFAULT_ROOM
+    state = await get_state_doc(room)
+    related_ids = {doc.get("media_id"), doc.get("pre_plakat_id")}
+    related_ids.discard(None)
+    if state.get("pgm_id") in related_ids:
+        new_state = {
+            **state,
+            "pgm_id": None,
+            "is_playing": False,
+            "current_time": 0,
+            "next_up_text": "",
+        }
+        await db.state.update_one(
+            {"id": room},
+            {"$set": {
+                "pgm_id": None,
+                "is_playing": False,
+                "current_time": 0,
+                "next_up_text": "",
+            }},
+        )
+        await broadcast_state(new_state, room)
     return {"ok": True}
 
 

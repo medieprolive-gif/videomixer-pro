@@ -244,10 +244,20 @@ export default function Display() {
       }
       hlsRef.current = null;
     }
-
-    if (!state?.pgm_id) {
+    // Reset the <video> element's display so the previous clip's last frame
+    // doesn't briefly flash through during the load of the next source.
+    // Without this you can see the OUTGOING video frame appear between
+    // sponsor → main-item handoffs because the browser keeps the last
+    // decoded frame painted until the new src is canplay-ready.
+    try {
+      v.pause();
       v.removeAttribute("src");
       v.load();
+    } catch (_) {
+      /* noop */
+    }
+
+    if (!state?.pgm_id) {
       return;
     }
 
@@ -509,28 +519,32 @@ export default function Display() {
       setPgmStartedAt(0);
     }
   }, [state?.pgm_id]);
+  // Title used for the "Nå"-overlay. Prefer a scheduled item's title (richer:
+  // "Miss Marple · S01E01"), fall back to the media file name. Returns null
+  // when the current PGM is a pre-plakat/sponsor — we don't want the "Nå"
+  // pill to appear on top of the sponsor screen, only on the actual item.
+  const nowPlayingTitle = useMemo(() => {
+    if (!state?.pgm_id) return null;
+    // If PGM matches a scheduled item's pre_plakat_id, hide the overlay.
+    const asPrePlakat = (schedule || []).find(
+      (s) => s.pre_plakat_id === state.pgm_id && s.status !== "cancelled"
+    );
+    if (asPrePlakat) return null;
+    const active = (schedule || []).find(
+      (s) => s.media_id === state.pgm_id && s.status !== "cancelled"
+    );
+    return active?.title || pgm?.filename || null;
+  }, [schedule, state?.pgm_id, pgm?.filename]);
+
   const showNowPlaying =
     !!pgm &&
     !!state?.pgm_id &&
+    !!nowPlayingTitle &&
     state?.is_playing &&
     pgmStartedAt > 0 &&
     now - pgmStartedAt < 10000 &&
     !showNextUp &&
     !showKioskOverlay;
-
-  // Title used for the "Nå"-overlay. Prefer a scheduled item's title (richer:
-  // "Miss Marple · S01E01"), fall back to the media file name.
-  const nowPlayingTitle = useMemo(() => {
-    if (!state?.pgm_id) return "";
-    const active = (schedule || []).find(
-      (s) => s.media_id === state.pgm_id && s.status !== "cancelled"
-    );
-    return (
-      active?.title ||
-      pgm?.filename ||
-      ""
-    );
-  }, [schedule, state?.pgm_id, pgm?.filename]);
 
   const idle = !state?.pgm_id;
 
