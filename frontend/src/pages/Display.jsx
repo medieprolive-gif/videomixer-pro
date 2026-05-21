@@ -486,13 +486,16 @@ export default function Display() {
   }, [isImage, state?.current_time, pgm?.duration, state]);
 
   const remaining = Math.max(0, (pgmDuration || 0) - (pgmTime || 0));
+  // "Neste opp"-overlay vises 30→20 sek FØR slutt (varer 10 sek), ikke i de
+  // siste 10 sek. Gir seerne tid til å registrere hva som kommer mens dagens
+  // innslag fortsatt har tid igjen.
   const showNextUp =
     !!state?.next_up_text &&
     !!pgm &&
     state?.is_playing &&
     pgmDuration > 0 &&
-    remaining <= 10 &&
-    remaining > 0;
+    remaining <= 30 &&
+    remaining > 20;
 
   // "Nå:"-overlay — viser tittelen på det innslaget som akkurat startet,
   // i 10 sek fra det øyeblikket browseren ser pgm_id endre seg. Vi sporer
@@ -584,10 +587,15 @@ export default function Display() {
     return { time: `${hh}:${mm}`, title, rel };
   }, [nextScheduled, media, now]);
 
-  // Show schedule ticker when idle OR not overlapping with "next up"-overlay
-  // Hidden when full program overview is up (it already shows next items).
+  // Show schedule ticker ONLY when idle (no active PGM). During an active
+  // item the "Nå" / "Neste opp"-overlays are the source of truth — the
+  // continuous bottom-left ticker would otherwise overlap with them and
+  // double up the info on screen.
   const showScheduleTicker =
-    !!nextScheduledLabel && !showNextUp && !showKioskOverlay;
+    !!nextScheduledLabel &&
+    !showNextUp &&
+    !showKioskOverlay &&
+    !state?.pgm_id;
 
   // Track whether the currently-pointed-to media element is ready to render
   // its first frame. We use this to hold the program-overview overlay up
