@@ -684,8 +684,13 @@ export default function Display() {
       >
         <video
           ref={(el) => {
-            videoRef.current = el;
-            if (el) {
+            // Only run once on mount — re-running this on every render would
+            // overwrite the `muted=false` that the apply-state effect sets
+            // when the operator unmutes from /control, leaving the video
+            // permanently silent. Subsequent updates are handled by the
+            // apply-state effect alone.
+            if (el && videoRef.current !== el) {
+              videoRef.current = el;
               // Critical: React's `muted` JSX prop doesn't reliably set the
               // DOM `muted` property. Without an actually-muted element,
               // browsers attempt autoplay-with-sound, get rejected, and
