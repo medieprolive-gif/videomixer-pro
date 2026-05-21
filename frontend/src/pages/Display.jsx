@@ -603,22 +603,37 @@ export default function Display() {
   // black "loading" gap between segments and gives broadcast-style cuts.
   const [mediaReady, setMediaReady] = useState(true);
 
+  // Tracks whether the current PGM "sequence" has already shown at least
+  // one item to the viewer. Reset when we go idle (pgm_id=null), set to
+  // true the first time `mediaReady` flips true with a pgm_id. Used to
+  // suppress the program-overview overlay between consecutive items in a
+  // sequence (e.g. sponsor plakat → main item). Without this, the overlay
+  // would flash back on for the few hundred milliseconds the next clip
+  // takes to reach `canplay`, creating a jarring overview→sponsor→overview→
+  // main-item flicker chain.
+  const hasShownItemRef = useRef(false);
+  useEffect(() => {
+    if (!state?.pgm_id) {
+      hasShownItemRef.current = false;
+    } else if (mediaReady) {
+      hasShownItemRef.current = true;
+    }
+  }, [state?.pgm_id, mediaReady]);
+
   // Program overview: shown full-screen between scheduled items and while idle.
   // Driven by user setting on /playout. Hides when:
   //  - kiosk start overlay is up (initial fullscreen prompt)
-  //  - a scheduled item is currently within its play window AND the new
-  //    media has reported it can render its first frame (no black flash)
   //  - the "Next up" overlay is up (so we don't double up text on screen)
+  //  - we're actively running a sequence (pgm_id set, and we've already
+  //    decoded at least one item — `hasShownItemRef`).
+  // The mediaReady-guard only applies to the FIRST item of a sequence so
+  // the initial overview→first-clip transition is masked; subsequent
+  // hand-offs (sponsor→main) stay overlay-free for a clean broadcast cut.
   const showProgramOverview =
     !!settings?.program_overview_enabled &&
     !showKioskOverlay &&
     !showNextUp &&
-    // Hold the overview up until we ACTUALLY have playable media on screen.
-    // Three guards: (1) no scheduled item is in its window yet, (2) the
-    // backend hasn't pushed the new pgm_id (state.pgm_id null), or (3) the
-    // media element has not signalled it can render its first frame. This
-    // eliminates the black gap between overview-hides and video-shows.
-    (!isInScheduledWindow || !state?.pgm_id || !mediaReady);
+    (!state?.pgm_id || (!mediaReady && !hasShownItemRef.current));
   showOverviewRef.current = showProgramOverview;
 
   // Reset mediaReady whenever PGM source changes; flip back to true when the
