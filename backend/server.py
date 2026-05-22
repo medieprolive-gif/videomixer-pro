@@ -169,13 +169,7 @@ async def scheduler_tick():
             await _play_main_item(item)
 
     # Sync state.current_time + expire-on-overrun for every active room.
-    # Without this:
-    #  - Late-joining viewers ALWAYS see the active clip at 00:00 instead
-    #    of jumping into the correct position in the broadcast.
-    #  - PGM stays "stuck" on the last clip long after its scheduled window
-    #    has passed, so /display keeps playing it instead of returning to
-    #    program overview.
-    rooms = await db.state.distinct("id")
+    rooms = await db.playback_state.distinct("id")
     for room in rooms:
         state = await get_state_doc(room)
         if not state.get("pgm_id") or not state.get("is_playing"):
@@ -194,6 +188,44 @@ async def scheduler_tick():
             sort=[("scheduled_at", -1)],
         )
         if not active:
+            # No schedule item references this PGM — typical when the user
+            # cleared the timeline while a clip was airing, OR after a clip
+            # finished its scheduled window and was archived but PGM never
+            # got cleared. If the room has NO scheduled items currently in
+            # their active window, we treat the channel as idle and reset
+            # PGM so /display returns to program overview.
+            day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+            day_end = day_start + timedelta(days=1)
+            today_items = await db.schedule.find(
+                {
+                    "room": room,
+                    "status": {"$ne": "cancelled"},
+                    "scheduled_at": {
+                        "$gte": day_start.isoformat(),
+                        "$lt": day_end.isoformat(),
+                    },
+                },
+                {"_id": 0, "scheduled_at": 1, "duration_minutes": 1},
+            ).to_list(500)
+            any_in_window = False
+            for t in today_items:
+                ts = t["scheduled_at"]
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                end = ts + timedelta(minutes=float(t.get("duration_minutes") or 15))
+                if ts <= now < end:
+                    any_in_window = True
+                    break
+            if not any_in_window:
+                state["pgm_id"] = None
+                state["pvw_id"] = None
+                state["is_playing"] = False
+                state["current_time"] = 0.0
+                state["next_up_text"] = ""
+                await save_state(state, room)
+                await broadcast_state(state, room)
             continue
         sched_at = active["scheduled_at"]
         if isinstance(sched_at, str):
@@ -1947,7 +1979,7 @@ async def delete_schedule(sched_id: str, _: bool = Depends(require_auth)):
             "current_time": 0,
             "next_up_text": "",
         }
-        await db.state.update_one(
+        await db.playback_state.update_one(
             {"id": room},
             {"$set": {
                 "pgm_id": None,
